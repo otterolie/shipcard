@@ -1,0 +1,20 @@
+node_modules
+dist
+*.log
+.DS_Store
+coverage
+.env
+.env.local
+
+# Generated outputs
+shipcard-preview.html
+*-preview.html
+audit-*.js
+
+# Build / editor
+*.tsbuildinfo
+.idea/
+.vscode/
+
+# Local working notes
+tasks/

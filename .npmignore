@@ -1,0 +1,19 @@
+src
+tests
+tsconfig.json
+tsup.config.ts
+.gitignore
+vitest.config.ts
+node_modules
+*.log
+.DS_Store
+coverage
+.env
+.env.local
+tasks
+
+# Junk / generated (defense in depth even with package.json "files")
+audit-*.js
+shipcard-preview.html
+*-preview.html
+*.tsbuildinfo

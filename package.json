@@ -1,0 +1,78 @@
+{
+  "name": "shipcard",
+  "version": "0.1.0",
+  "description": "Catch broken social cards before you ship. Local-first preflight checker + actionable suggestions for Open Graph, X/Twitter, Pinterest, WhatsApp, Telegram, Bluesky, Mastodon and other platforms. Point it at a folder or dev server — no uploads, no browser, just your HTML + images.",
+  "keywords": [
+    "open-graph",
+    "og",
+    "twitter-card",
+    "social-preview",
+    "meta-tags",
+    "og-image",
+    "pinterest",
+    "whatsapp",
+    "telegram",
+    "bluesky",
+    "mastodon",
+    "social-cards",
+    "link-preview",
+    "seo",
+    "preflight",
+    "cli",
+    "validator"
+  ],
+  "author": "Otter Olie",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/otterolie/shipcard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/otterolie/shipcard/issues"
+  },
+  "homepage": "https://github.com/otterolie/shipcard#readme",
+  "type": "module",
+  "bin": {
+    "shipcard": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "chokidar": "^3.6.0",
+    "commander": "^12.1.0",
+    "fast-glob": "^3.3.2",
+    "mime-types": "^2.1.35",
+    "picocolors": "^1.1.1",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.14.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
