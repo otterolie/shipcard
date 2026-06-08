@@ -1,5 +1,5 @@
 {
-  "name": "shipcard",
+  "name": "@otterolie/shipcard",
   "version": "0.1.0",
   "description": "Catch broken social cards before you ship. Local-first preflight checker + actionable suggestions for Open Graph, X/Twitter, Pinterest, WhatsApp, Telegram, Bluesky, Mastodon and other platforms. Point it at a folder or dev server — no uploads, no browser, just your HTML + images.",
   "keywords": [
@@ -33,7 +33,7 @@
   "homepage": "https://github.com/otterolie/shipcard#readme",
   "type": "module",
   "bin": {
-    "shipcard": "./dist/cli.js"
+    "shipcard": "dist/cli.js"
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
