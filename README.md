@@ -2,7 +2,9 @@
 
 Checks that your Open Graph / Twitter / social meta tags actually work before you ship. Point it at `./dist` or `http://localhost:3000` — it reads the HTML, checks images, scores the page, and tells you what to fix.
 
-Against a local folder it does as much as possible on disk: walks every HTML page (or auto-picks `dist` / `out` / `build` / `public` if you point at the repo root — and one level deeper into `client` / `public` / `static` / `www` for split builds like Astro's node adapter, Next.js `standalone` output, or SvelteKit's adapter-node), resolves `og:image` / `twitter:image` to files in the tree when the path matches (even if the tag uses a production `https://…` URL), and flags relative/localhost URLs, missing alts, and dimension mismatches.
+Against a local folder it does as much as possible on disk: walks every HTML page (or auto-picks `dist` / `out` / `build` / `public` if you point at the repo root), resolves `og:image` / `twitter:image` to files in the tree when the path matches (even if the tag uses a production `https://…` URL), and flags relative/localhost URLs, missing alts, and dimension mismatches.
+
+Split builds — Astro's node adapter, Next.js `standalone` output, SvelteKit's adapter-node — nest the real static site one level deeper under `client` / `public` / `static` / `www`, alongside server-only bundles. shipcard auto-descends into that subfolder when it finds one, so `shipcard ./dist` resolves images correctly even when `./dist` itself isn't the site root. If it ever picks the wrong folder anyway, a leak will say so directly and point at the folder that actually has the matching file.
 
 If an absolute image URL points at a **different host** with no file in the folder, shipcard says so clearly — that check hits the live URL, not your tree. For pre-launch QA use `--offline`.
 
@@ -63,6 +65,8 @@ Common failures it calls out:
 - localhost or relative `og:url` / canonical
 - relative or plain `http://` image URLs
 - image missing, unreadable, under 1200×630, or over 5 MB
+- declared `og:image:width`/`height` don't match the file's real dimensions — e.g. a source photo too small to upscale, so the build silently shipped an undersized card
+- image reference resolves to nothing here, but a file with the same path exists elsewhere in the folder — usually the wrong build output folder was scanned
 - external image hosts when scanning a folder (live check, not local file)
 - the same core tag declared twice
 
