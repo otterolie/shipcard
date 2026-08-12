@@ -1,9 +1,9 @@
-import type { AuditOptions, PageReport, SocialMeta, Warning } from "./types.js";
+import type { AuditOptions, ImageAudit, PageReport, SocialMeta, Warning } from "./types.js";
 import { extractMeta } from "./extract-meta.js";
 import { findDuplicateCoreTags, scorePage, statusFromScore } from "./score.js";
 import { validateImage } from "./validate-image.js";
 import { platformPreviews } from "./platforms.js";
-import { isLocalhostUrl } from "./utils.js";
+import { isLocalhostUrl, isRelativeOrPathOnly } from "./utils.js";
 
 export type AuditHtmlOptions = AuditOptions & {
   /** Display label for this page in the report (URL or file path). */
@@ -19,16 +19,44 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
   const meta = extractMeta(html);
   const warnings = collectMetaWarnings(meta);
 
-  let image = null;
-  if (meta.image && options.validateImages !== false) {
-    image = await validateImage(meta.image, {
-      baseUrl: options.baseUrl,
-      baseDir: options.baseDir,
-      sourceUrl: options.sourceUrl,
-      sourceFile: options.sourceFile,
-      timeoutMs: options.timeoutMs,
-    });
-    warnings.push(...image.warnings);
+  const resolveOpts = {
+    baseUrl: options.baseUrl,
+    baseDir: options.baseDir,
+    sourceUrl: options.sourceUrl,
+    sourceFile: options.sourceFile,
+    timeoutMs: options.timeoutMs,
+    offline: options.offline,
+  };
+
+  let images: ImageAudit[] = [];
+  let image: ImageAudit | null = null;
+
+  if (options.validateImages !== false) {
+    const sources = collectImageSources(meta);
+    for (const { url, label } of sources) {
+      images.push(await validateImage(url, { ...resolveOpts, label }));
+    }
+    image = images[0] ?? null;
+    for (const img of images) {
+      warnings.push(...img.warnings);
+    }
+
+    // Declared og:image:width/height vs real probe (primary image)
+    if (image?.found && image.width && image.height) {
+      const declaredW = parseInt(meta.raw.openGraph["image:width"]?.[0] ?? "", 10);
+      const declaredH = parseInt(meta.raw.openGraph["image:height"]?.[0] ?? "", 10);
+      if (
+        Number.isFinite(declaredW) &&
+        Number.isFinite(declaredH) &&
+        (declaredW !== image.width || declaredH !== image.height)
+      ) {
+        warnings.push({
+          severity: "warning",
+          code: "og-image-dimensions-mismatch",
+          message: `og:image:width/height is ${declaredW}x${declaredH} but the file is ${image.width}x${image.height}.`,
+        });
+      }
+    }
   }
 
   if (isLocalhostUrl(meta.url)) {
@@ -37,12 +65,25 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
       code: "og-url-localhost",
       message: `og:url points to localhost ("${meta.url}").`,
     });
+  } else if (isRelativeOrPathOnly(meta.url)) {
+    warnings.push({
+      severity: "warning",
+      code: "og-url-relative",
+      message: `og:url is not an absolute URL ("${meta.url}"). Crawlers need https://…`,
+    });
   }
+
   if (isLocalhostUrl(meta.canonical)) {
     warnings.push({
       severity: "warning",
       code: "canonical-localhost",
       message: `canonical points to localhost ("${meta.canonical}").`,
+    });
+  } else if (isRelativeOrPathOnly(meta.canonical)) {
+    warnings.push({
+      severity: "warning",
+      code: "canonical-relative",
+      message: `canonical is not an absolute URL ("${meta.canonical}"). Prefer https://…`,
     });
   }
 
@@ -56,10 +97,32 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
     status: statusFromScore(score),
     meta,
     image,
+    images,
     checks,
     warnings,
     platforms,
   };
+}
+
+/** Unique social image URLs to validate, primary first. */
+function collectImageSources(meta: SocialMeta): Array<{ url: string; label: string }> {
+  const out: Array<{ url: string; label: string }> = [];
+  const seen = new Set<string>();
+
+  const push = (url: string | undefined, label: string) => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    out.push({ url, label });
+  };
+
+  for (const url of meta.raw.openGraph["image"] ?? []) {
+    push(url, "og:image");
+  }
+  for (const url of meta.raw.twitter["image"] ?? []) {
+    push(url, "twitter:image");
+  }
+
+  return out;
 }
 
 function collectMetaWarnings(meta: SocialMeta): Warning[] {
@@ -71,6 +134,14 @@ function collectMetaWarnings(meta: SocialMeta): Warning[] {
   if (!og["image"]?.[0]) w.push(missing("error", "missing-og-image", "og:image"));
   if (!meta.twitterCard) w.push(missing("warning", "missing-twitter-card", "twitter:card"));
   if (!meta.canonical) w.push(missing("info", "missing-canonical", "canonical link"));
+
+  if (og["image"]?.[0] && !og["image:alt"]?.[0]) {
+    w.push({
+      severity: "info",
+      code: "og-image-alt-missing",
+      message: "og:image:alt is missing. Accessibility and some platforms benefit from a short alt text.",
+    });
+  }
 
   const dupes = findDuplicateCoreTags(meta);
   if (dupes.length > 0) {

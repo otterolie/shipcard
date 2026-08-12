@@ -101,7 +101,10 @@ export type PageReport = {
   score: number;
   status: PageStatus;
   meta: SocialMeta;
+  /** Primary image probe (first og:image, else first twitter:image). */
   image: ImageAudit | null;
+  /** Every distinct social image validated (og + twitter). */
+  images?: ImageAudit[];
   checks: CheckResult[];
   warnings: Warning[];
   platforms: PlatformPreview[];
@@ -125,6 +128,11 @@ export type AuditReport = {
     failed: number;
   };
   pages: PageReport[];
+  /**
+   * Agent-oriented action plan (present on CLI --json and advise()).
+   * Optional so programmatic callers that build reports by hand stay valid.
+   */
+  plan?: import("./plan.js").Plan;
 };
 
 export type AuditOptions = {
@@ -132,20 +140,15 @@ export type AuditOptions = {
   baseUrl?: string;
   /** Filesystem root used when resolving local image paths. */
   baseDir?: string;
-  /** Whether to fetch and validate referenced images. */
+  /** Whether to fetch and validate referenced images. Default true. */
   validateImages?: boolean;
+  /**
+   * When true, never hit the network for images. Absolute URLs are only checked
+   * if they map to a file under baseDir. Ideal for pre-launch folder audits.
+   */
+  offline?: boolean;
   /** Timeout in ms when fetching remote resources. */
   timeoutMs?: number;
-  /**
-   * Version string to embed in reports and User-Agent (e.g. "1.2.3").
-   * If omitted, the built-in package version is used.
-   */
+  /** Version string in reports / User-Agent. Defaults to package version. */
   version?: string;
-  /**
-   * When generating --preview for folder targets with local images: embed the image
-   * contents as data: base64 URIs. This makes the output HTML fully self-contained and
-   * portable (images will render even when opened from a different machine or without
-   * access to the original filesystem paths). Default false to keep HTML small.
-   */
-  embedLocalImages?: boolean;
 };

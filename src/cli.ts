@@ -1,218 +1,282 @@
 #!/usr/bin/env node
-import fs from "node:fs/promises";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
-import { Command } from "commander";
+import { parseArgs } from "node:util";
 import pc from "picocolors";
-import { auditUrl } from "./audit-url.js";
-import { auditFolder, NoHtmlFilesError } from "./audit-folder.js";
+import { audit } from "./index.js";
+import { planFromReport } from "./plan.js";
+import { NoHtmlFilesError } from "./audit-folder.js";
 import { renderTerminal } from "./render-terminal.js";
 import { renderPreviewHtml } from "./preview-html.js";
-import { isHttpUrl } from "./utils.js";
 import { VERSION } from "./version.js";
 import type { AuditReport } from "./types.js";
 
 const DEFAULT_PREVIEW_PATH = "shipcard-preview.html";
 
 type CliOptions = {
-  json?: boolean;
+  json: boolean;
   failBelow?: string;
   timeout?: string;
-  // commander turns --no-images into images: false
-  images?: boolean;
-  // --preview with no arg → true; --preview <file> → string
-  preview?: boolean | string;
-  /** Write the main report (json or terminal text) to this file instead of (or in addition to) stdout. */
+  images: boolean;
+  offline: boolean;
+  preview?: string;
   output?: string;
-  /** Watch the target for changes and re-run (requires chokidar). */
-  watch?: boolean;
-  /** For --preview on folder targets: embed local images as data:base64 (see types). */
-  embed?: boolean;
+  watch: boolean;
+  embed: boolean;
 };
 
-async function run(target: string, opts: CliOptions): Promise<number> {
-  const failBelow = parseFailBelow(opts.failBelow);
-  if (failBelow instanceof Error) {
-    printError(failBelow.message);
-    return 1;
+const HELP = `shipcard ${VERSION}
+
+Catch broken social cards before you ship.
+
+Usage:
+  shipcard <target> [options]
+
+  target  URL, folder, .html file, or - for stdin
+
+Options:
+  --json                 print JSON (includes plan.actions for agents)
+  --fail-below <n>       exit 1 if score < n (0-100)
+  --timeout <ms>         network timeout
+  --no-images            skip image validation entirely
+  --offline              don't fetch remote images (local files / path maps only)
+  --preview [file]       write HTML card mockups (default: ${DEFAULT_PREVIEW_PATH})
+  --embed                with --preview, inline local images as data: URIs
+  --output <file>        write the report to a file
+  --watch                re-run when the target changes
+  -h, --help             show help
+  -V, --version          show version
+
+Pre-launch tip:
+  Absolute og:image URLs to a site that isn't deployed yet will 404 on live fetch.
+  Prefer:  shipcard ./dist --offline
+  Or skip images:  shipcard ./dist --no-images --fail-below 80
+`;
+
+function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help" | "version" {
+  // parseArgs requires a value for string options; bare --preview → default path
+  const normalized: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--preview") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("-")) {
+        normalized.push("--preview", DEFAULT_PREVIEW_PATH);
+      } else {
+        normalized.push("--preview", next);
+        i++;
+      }
+      continue;
+    }
+    normalized.push(arg);
   }
 
-  const timeoutMs = opts.timeout ? Number(opts.timeout) : undefined;
-  const validateImages = opts.images !== false;
+  let values: Record<string, unknown>;
+  let positionals: string[];
+  try {
+    const parsed = parseArgs({
+      args: normalized,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        json: { type: "boolean", default: false },
+        "fail-below": { type: "string" },
+        timeout: { type: "string" },
+        "no-images": { type: "boolean", default: false },
+        offline: { type: "boolean", default: false },
+        preview: { type: "string" },
+        output: { type: "string" },
+        watch: { type: "boolean", default: false },
+        embed: { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+        version: { type: "boolean", short: "V", default: false },
+      },
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  }
 
-  const embedLocalImages = !!opts.embed;
+  if (values.help) return "help";
+  if (values.version) return "version";
+
+  const target = positionals[0];
+  if (!target) {
+    throw new Error("Missing target. Pass a URL, folder, .html file, or - for stdin.");
+  }
+  if (positionals.length > 1) {
+    throw new Error(`Unexpected arguments: ${positionals.slice(1).join(" ")}`);
+  }
+
+  return {
+    target,
+    opts: {
+      json: !!values.json,
+      failBelow: values["fail-below"] as string | undefined,
+      timeout: values.timeout as string | undefined,
+      images: !values["no-images"],
+      offline: !!values.offline,
+      preview: values.preview as string | undefined,
+      output: values.output as string | undefined,
+      watch: !!values.watch,
+      embed: !!values.embed,
+    },
+  };
+}
+
+async function runOnce(target: string, opts: CliOptions): Promise<{ code: number; report?: AuditReport }> {
+  const failBelow = parseFailBelow(opts.failBelow);
+  if (failBelow instanceof Error) {
+    emitError(opts, "bad-flag", failBelow.message);
+    return { code: 1 };
+  }
 
   let report: AuditReport;
   try {
-    if (isHttpUrl(target)) {
-      report = await auditUrl(target, { version: VERSION, timeoutMs, validateImages, embedLocalImages });
-    } else {
-      // Support single .html file, folder, or "-" for stdin
-      if (target === "-") {
-        // stdin html
-        const chunks: Buffer[] = [];
-        for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-        const html = Buffer.concat(chunks).toString("utf8") || "<html><head></head><body></body></html>";
-        const page = await (await import("./audit-html.js")).auditHtml(html, {
-          source: "<stdin>",
-          path: "/stdin.html",
-          ...{ validateImages, embedLocalImages, timeoutMs },
-        });
-        const { summarize } = await import("./summarize.js");
-        report = {
-          tool: "shipcard",
-          version: VERSION,
-          createdAt: new Date().toISOString(),
-          target: { type: "folder", input: "-" },
-          summary: summarize([page]),
-          pages: [page],
-        };
-      } else {
-        const stat = await fs.stat(target).catch(() => null);
-        if (!stat) {
-          if (opts.json) {
-            const e = { tool: "shipcard", version: VERSION, error: { code: "target-not-found", message: `Target not found: ${target}` } };
-            process.stdout.write(JSON.stringify(e, null, 2) + "\n");
-          } else {
-            printError(`Target not found: ${target}`);
-            printHint("Pass a URL, a folder (./dist), a .html file, or - for stdin.");
-          }
-          return 1;
-        }
-        if (stat.isFile() && /\.(html|htm)$/i.test(target)) {
-          // single file -> treat as 1-page report (reuse auditHtml + wrap)
-          const html = await fs.readFile(target, "utf8");
-          const page = await (await import("./audit-html.js")).auditHtml(html, {
-            source: target,
-            path: "/" + path.basename(target),
-            sourceFile: target,
-            baseDir: path.dirname(target),
-            validateImages,
-            embedLocalImages,
-            timeoutMs,
-          });
-          const { summarize } = await import("./summarize.js");
-          report = {
-            tool: "shipcard",
-            version: VERSION,
-            createdAt: new Date().toISOString(),
-            target: { type: "folder", input: target },
-            summary: summarize([page]),
-            pages: [page],
-          };
-        } else if (stat.isDirectory()) {
-          report = await auditFolder(path.resolve(target), {
-            version: VERSION,
-            timeoutMs,
-            validateImages,
-            embedLocalImages,
-          });
-        } else {
-          printError(`Target is not a directory or .html file: ${target}`);
-          return 1;
-        }
-      }
-    }
+    report = await audit(target, {
+      version: VERSION,
+      timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+      validateImages: opts.images,
+      offline: opts.offline,
+    });
   } catch (err) {
     if (err instanceof NoHtmlFilesError) {
-      if (opts.json) {
-        const errReport = {
-          tool: "shipcard",
-          version: VERSION,
-          error: {
-            code: "no-html-files",
-            message: err.message,
-            hint: "Point shipcard at a built site folder. Common targets: ./dist, ./out, ./build, ./public.",
-          },
-        };
-        process.stdout.write(JSON.stringify(errReport, null, 2) + "\n");
-      } else {
-        printError(err.message);
-        printHint("Point shipcard at a built site folder. Common targets: ./dist, ./out, ./build, ./public.");
-      }
-      return 1;
+      emitError(
+        opts,
+        "no-html-files",
+        err.message,
+        "Point shipcard at a built site folder. Common targets: ./dist, ./out, ./build, ./public.",
+      );
+      return { code: 1 };
     }
     const msg = err instanceof Error ? err.message : String(err);
-    if (opts.json) {
-      const errReport = {
-        tool: "shipcard",
-        version: VERSION,
-        error: { code: "audit-failed", message: msg },
-      };
-      process.stdout.write(JSON.stringify(errReport, null, 2) + "\n");
-    } else {
-      printError(`Audit failed: ${msg}`);
-    }
-    return 1;
+    const code = msg.startsWith("Target not found") ? "target-not-found" : "audit-failed";
+    const hint =
+      code === "target-not-found"
+        ? "Pass a URL, a folder (./dist), a .html file, or - for stdin."
+        : undefined;
+    emitError(opts, code, msg, hint);
+    return { code: 1 };
   }
+
+  // Always attach plan for machine consumers; agents use plan.actions as the todo list.
+  const plan = planFromReport(report);
+  const reportWithPlan: AuditReport = { ...report, plan };
 
   if (opts.json) {
-    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(reportWithPlan, null, 2) + "\n");
   } else {
-    process.stdout.write(renderTerminal(report));
+    process.stdout.write(renderTerminal(reportWithPlan));
   }
 
-  // --output support (write the primary report artifact)
   if (opts.output) {
     try {
       const content = opts.json
-        ? JSON.stringify(report, null, 2) + "\n"
-        : renderTerminal(report);
-      await fs.writeFile(path.resolve(opts.output), content, "utf8");
-      if (!opts.json) {
-        process.stdout.write(pc.dim(`\nReport written to ${opts.output}\n`));
-      }
+        ? JSON.stringify(reportWithPlan, null, 2) + "\n"
+        : renderTerminal(reportWithPlan);
+      await fsp.writeFile(path.resolve(opts.output), content, "utf8");
+      if (!opts.json) process.stdout.write(pc.dim(`\nReport written to ${opts.output}\n`));
     } catch (err) {
-      printError(`Could not write --output: ${err instanceof Error ? err.message : String(err)}`);
-      return 1;
+      emitError(
+        opts,
+        "write-failed",
+        `Could not write --output: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { code: 1 };
     }
   }
 
   if (opts.preview) {
-    const previewPath = typeof opts.preview === "string" ? opts.preview : DEFAULT_PREVIEW_PATH;
     try {
-      await fs.writeFile(path.resolve(previewPath), renderPreviewHtml(report, { embedLocalImages: !!opts.embed }), "utf8");
-      if (!opts.json) {
-        process.stdout.write(pc.dim(`\nPreview written to ${previewPath}\n`));
-      }
+      await fsp.writeFile(
+        path.resolve(opts.preview),
+        renderPreviewHtml(reportWithPlan, { embedLocalImages: opts.embed }),
+        "utf8",
+      );
+      if (!opts.json) process.stdout.write(pc.dim(`\nPreview written to ${opts.preview}\n`));
     } catch (err) {
-      printError(`Could not write preview: ${err instanceof Error ? err.message : String(err)}`);
-      return 1;
+      emitError(
+        opts,
+        "write-failed",
+        `Could not write preview: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { code: 1 };
     }
   }
 
-  if (failBelow !== null && report.summary.score < failBelow) {
+  if (failBelow !== null && reportWithPlan.summary.score < failBelow) {
     if (!opts.json) {
       process.stdout.write(
-        pc.red(`\nShip blocked: score ${report.summary.score} is below threshold ${failBelow}.\n`),
+        pc.red(
+          `\nShip blocked: score ${reportWithPlan.summary.score} is below threshold ${failBelow}.\n`,
+        ),
       );
     }
+    return { code: 1, report: reportWithPlan };
+  }
+
+  return { code: 0, report: reportWithPlan };
+}
+
+async function run(target: string, opts: CliOptions): Promise<number> {
+  const result = await runOnce(target, opts);
+  if (!opts.watch) return result.code;
+
+  const toWatch = target === "-" ? process.cwd() : target;
+  process.stderr.write(pc.dim(`[watch] Watching ${toWatch} for changes (Ctrl-C to stop)\n`));
+
+  let timer: NodeJS.Timeout | null = null;
+  let running = false;
+  let pending = false;
+
+  const kick = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(async () => {
+      if (running) {
+        pending = true;
+        return;
+      }
+      running = true;
+      process.stderr.write(pc.dim(`[watch] change — re-running audit...\n`));
+      try {
+        await runOnce(target, opts);
+      } finally {
+        running = false;
+        if (pending) {
+          pending = false;
+          kick();
+        }
+      }
+    }, 200);
+  };
+
+  const onChange = (_event: string, filename: string | null) => {
+    if (filename && String(filename).includes("node_modules")) return;
+    kick();
+  };
+
+  try {
+    // recursive is solid on macOS/Windows; Linux support varies by Node version
+    let watcher: fs.FSWatcher;
+    try {
+      watcher = fs.watch(toWatch, { recursive: true }, onChange);
+    } catch {
+      watcher = fs.watch(toWatch, onChange);
+      process.stderr.write(pc.dim("[watch] recursive unavailable — watching top level only\n"));
+    }
+    watcher.on("error", (err) => {
+      process.stderr.write(pc.red(`[watch] ${err.message}\n`));
+    });
+  } catch (err) {
+    process.stderr.write(
+      pc.red(`shipcard: could not watch ${toWatch}: ${err instanceof Error ? err.message : String(err)}\n`),
+    );
     return 1;
   }
 
-  if (opts.watch) {
-    const chokidarMod: any = await import("chokidar");
-    const chokidar = chokidarMod.default || chokidarMod;
-    const toWatch = target === "-" ? process.cwd() : target;
-    const watcher = chokidar.watch(toWatch, {
-      ignoreInitial: true,
-      ignored: /(^|[/\\])node_modules([/\\]|$)/,
-      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
-    });
-    process.stderr.write(pc.dim(`[watch] Watching ${toWatch} for changes (Ctrl-C to stop)\n`));
-    watcher.on("all", async (event: string, changedPath?: string) => {
-      if (changedPath && changedPath.includes("node_modules")) return;
-      process.stderr.write(pc.dim(`[watch] ${event} ${changedPath || ""} — re-running audit...\n`));
-      try {
-        // One-shot re-run (watch flag off to avoid nesting)
-        await run(target, { ...opts, watch: false } as any);
-      } catch (e) {
-        // errors already printed by inner run
-      }
-    });
-    // Keep the process alive for the watcher
-    await new Promise(() => {});
-  }
-
+  await new Promise(() => {});
   return 0;
 }
 
@@ -225,34 +289,43 @@ function parseFailBelow(value: string | undefined): number | null | Error {
   return n;
 }
 
-function printError(message: string): void {
+function emitError(opts: CliOptions, code: string, message: string, hint?: string): void {
+  if (opts.json) {
+    const body: Record<string, unknown> = {
+      tool: "shipcard",
+      version: VERSION,
+      error: hint ? { code, message, hint } : { code, message },
+    };
+    process.stdout.write(JSON.stringify(body, null, 2) + "\n");
+    return;
+  }
   process.stderr.write(pc.red(`shipcard: ${message}\n`));
+  if (hint) process.stderr.write(pc.dim(`hint: ${hint}\n`));
 }
 
-function printHint(message: string): void {
-  process.stderr.write(pc.dim(`hint: ${message}\n`));
+async function main(): Promise<void> {
+  let parsed: ReturnType<typeof parseCli>;
+  try {
+    parsed = parseCli(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(pc.red(`shipcard: ${err instanceof Error ? err.message : String(err)}\n`));
+    process.stderr.write(pc.dim("Try shipcard --help\n"));
+    process.exit(1);
+  }
+
+  if (parsed === "help") {
+    process.stdout.write(HELP);
+    process.exit(0);
+  }
+  if (parsed === "version") {
+    process.stdout.write(VERSION + "\n");
+    process.exit(0);
+  }
+
+  process.exit(await run(parsed.target, parsed.opts));
 }
 
-const program = new Command();
-
-program
-  .name("shipcard")
-  .description("Catch broken social cards before you ship. Supports Meta, LinkedIn, X, Pinterest, WhatsApp, Telegram, Bluesky, Mastodon, Slack, Discord, iMessage and more.")
-  .version(VERSION)
-  .argument("<target>", "URL or folder to audit (e.g. http://localhost:3000 or ./dist)")
-  .option("--json", "output JSON only")
-  .option("--fail-below <score>", "exit with code 1 if score is below this threshold (0-100)")
-  .option("--timeout <ms>", "network timeout in milliseconds")
-  .option("--no-images", "skip image validation")
-  .option("--preview [file]", `write an HTML preview of every platform card (default: ${DEFAULT_PREVIEW_PATH})`)
-  .option("--output <file>", "write the report (JSON or terminal text) to a file")
-  .option("--watch", "watch target for changes and re-run (great for dev)")
-  .option("--embed", "for --preview on folders: embed local images as data:base64 (portable HTML)")
-  .action(async (target: string, opts: CliOptions) => {
-    process.exit(await run(target, opts));
-  });
-
-program.parseAsync(process.argv).catch((err) => {
-  printError(err instanceof Error ? err.message : String(err));
+main().catch((err) => {
+  process.stderr.write(pc.red(`shipcard: ${err instanceof Error ? err.message : String(err)}\n`));
   process.exit(1);
 });

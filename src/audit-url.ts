@@ -1,12 +1,11 @@
 import { auditHtml } from "./audit-html.js";
-import { summarize } from "./summarize.js";
+import { buildReport } from "./report.js";
 import { VERSION } from "./version.js";
 import type { AuditOptions, AuditReport } from "./types.js";
 
-export type AuditUrlOptions = AuditOptions & { version?: string };
-
 /** Fetch a URL and audit the response body. */
-export async function auditUrl(url: string, options: AuditUrlOptions): Promise<AuditReport> {
+export async function auditUrl(url: string, options: AuditOptions = {}): Promise<AuditReport> {
+  const version = options.version ?? VERSION;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 15_000);
 
@@ -16,7 +15,7 @@ export async function auditUrl(url: string, options: AuditUrlOptions): Promise<A
     const response = await fetch(url, {
       redirect: "follow",
       signal: controller.signal,
-      headers: { "user-agent": `shipcard/${VERSION}`, accept: "text/html" },
+      headers: { "user-agent": `shipcard/${version}`, accept: "text/html" },
     });
     if (!response.ok) throw new Error(`HTTP ${response.status} when fetching ${url}`);
     finalUrl = response.url || url;
@@ -32,14 +31,8 @@ export async function auditUrl(url: string, options: AuditUrlOptions): Promise<A
     baseUrl: finalUrl,
     validateImages: options.validateImages,
     timeoutMs: options.timeoutMs,
+    offline: options.offline,
   });
 
-  return {
-    tool: "shipcard",
-    version: options.version ?? VERSION,
-    createdAt: new Date().toISOString(),
-    target: { type: "url", input: url },
-    summary: summarize([page]),
-    pages: [page],
-  };
+  return buildReport([page], { version, type: "url", input: url });
 }

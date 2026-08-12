@@ -3,11 +3,9 @@ import type { SocialMeta } from "./types.js";
 import { firstNonEmpty } from "./utils.js";
 
 /**
- * Parse social/SEO metadata from an HTML document's <head>.
- *
- * OG and Twitter tags are accepted on either the `property` or `name` attribute —
- * the OGP spec uses `property` and the Twitter spec uses `name`, but real-world
- * sites mix them freely and major crawlers accept both.
+ * Parse social/SEO metadata from an HTML document.
+ * Scans the whole document (not only <head>) so misnested tags still get caught.
+ * OG/Twitter keys accepted on either `property` or `name`.
  */
 export function extractMeta(html: string): SocialMeta {
   const $ = cheerio.load(html);
@@ -16,7 +14,7 @@ export function extractMeta(html: string): SocialMeta {
   const twitter: Record<string, string[]> = {};
   const links: Record<string, string[]> = {};
 
-  $("head meta").each((_, el) => {
+  $("meta").each((_, el) => {
     const $el = $(el);
     const key = ($el.attr("property") || $el.attr("name") || "").trim().toLowerCase();
     const content = $el.attr("content");
@@ -31,7 +29,7 @@ export function extractMeta(html: string): SocialMeta {
     }
   });
 
-  $("head link").each((_, el) => {
+  $("link").each((_, el) => {
     const $el = $(el);
     const rel = ($el.attr("rel") || "").trim().toLowerCase();
     const href = $el.attr("href")?.trim();
@@ -39,9 +37,9 @@ export function extractMeta(html: string): SocialMeta {
     (links[rel] ||= []).push(href);
   });
 
-  const titleTag = $("head > title").first().text().trim() || null;
+  const titleTag = $("title").first().text().trim() || null;
   const metaDescription =
-    $('head meta[name="description"]').first().attr("content")?.trim() || null;
+    $('meta[name="description"]').first().attr("content")?.trim() || null;
 
   return {
     title: firstNonEmpty(openGraph["title"]?.[0], titleTag),

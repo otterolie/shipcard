@@ -47,24 +47,34 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
   }
 
   // Warning-driven fixes that aren't represented as checks
-  if (page.warnings.some((w) => w.code === "og-url-localhost")) {
+  if (page.warnings.some((w) => w.code === "og-url-localhost" || w.code === "og-url-relative")) {
     fixes.push({
       id: "fix-og-url-localhost",
       label: "Point og:url at production",
       weight: 0,
-      explain: `og:url is currently a localhost address. Production crawlers will resolve it to a broken link. Use your production URL before deploying.`,
+      explain: `og:url must be an absolute https:// URL in production. Localhost or relative values break crawlers.`,
       snippet: `<meta property="og:url" content="${pageUrl}">`,
       category: "url",
     });
   }
-  if (page.warnings.some((w) => w.code === "canonical-localhost")) {
+  if (page.warnings.some((w) => w.code === "canonical-localhost" || w.code === "canonical-relative")) {
     fixes.push({
       id: "fix-canonical-localhost",
       label: "Point canonical at production",
       weight: 0,
-      explain: `<link rel="canonical"> is currently a localhost address. Search engines and platforms will treat this as a broken canonical reference.`,
+      explain: `canonical must be an absolute https:// URL. Localhost or relative values confuse crawlers.`,
       snippet: `<link rel="canonical" href="${pageUrl}">`,
       category: "url",
+    });
+  }
+  if (page.warnings.some((w) => w.code === "og-image-alt-missing")) {
+    fixes.push({
+      id: "fix-og-image-alt",
+      label: "Add og:image:alt",
+      weight: 0,
+      explain: "A short alt text for og:image helps accessibility and some platforms.",
+      snippet: `<meta property="og:image:alt" content="${escapeAttr(suggestedTitle)}">`,
+      category: "image",
     });
   }
   if (page.warnings.some((w) => w.code === "duplicate-core-tags")) {
@@ -379,17 +389,7 @@ function escapeAttr(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/**
- * Apply a list of Fixes (from fixesForPage) to an original HTML string and return
- * the patched HTML. Uses cheerio (already a dep) for safe <head> insertion of the
- * provided snippets (title, meta, link tags). 
- *
- * - Idempotent-ish: inserting the same tag twice is possible but rare in practice
- *   (callers usually pass only missing fixes).
- * - Best-effort: the original document formatting/comments may change slightly
- *   due to cheerio serialization (documented).
- * - Accepts either Fix[] or a pre-bundled string from fixBundle().
- */
+/** Apply Fix snippets (or a fixBundle string) into <head>. Cheerio may reformat the document. */
 export function applyFixes(originalHtml: string, fixes: Fix[] | string): string {
   if (!fixes || (Array.isArray(fixes) && fixes.length === 0) || fixes === "") {
     return originalHtml;
@@ -397,25 +397,18 @@ export function applyFixes(originalHtml: string, fixes: Fix[] | string): string 
 
   const $ = cheerio.load(originalHtml);
 
-  let head = $("head");
-  if (head.length === 0) {
-    // Create head if missing (defensive for minimal html)
-    const htmlEl = $("html");
-    if (htmlEl.length === 0) {
-      // very broken input; prepend a head
-      return `<head></head>${originalHtml}`;
-    }
-    head = $("<head></head>").prependTo(htmlEl) as any;
+  if ($("head").length === 0) {
+    if ($("html").length === 0) return `<head></head>${originalHtml}`;
+    $("html").prepend("<head></head>");
   }
 
-  const snippets: string[] = Array.isArray(fixes)
-    ? fixes.filter((f) => !!f.snippet).map((f) => f.snippet as string)
-    : [fixes]; // treat as pre-bundled string
+  const snippets = Array.isArray(fixes)
+    ? fixes.map((f) => f.snippet).filter((s): s is string => !!s?.trim())
+    : [fixes];
 
   for (const snippet of snippets) {
-    if (!snippet || !snippet.trim()) continue;
-    // Append the snippet string (cheerio handles tag fragments safely for head content)
-    head.append(snippet);
+    if (!snippet.trim()) continue;
+    $("head").append(snippet);
   }
 
   return $.html();

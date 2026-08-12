@@ -1,4 +1,5 @@
 import { URL } from "node:url";
+import fs from "node:fs";
 import path from "node:path";
 
 export const RECOMMENDED_IMAGE_WIDTH = 1200;
@@ -37,6 +38,14 @@ export function isRelativeReference(value: string): boolean {
   return !isAbsoluteUrl(value) && !isDataUrl(value);
 }
 
+/** Path-only values that aren't absolute http(s). */
+export function isRelativeOrPathOnly(value: string | null | undefined): boolean {
+  if (!value) return false;
+  if (isDataUrl(value)) return false;
+  if (isHttpUrl(value)) return false;
+  return true;
+}
+
 export type ResolveContext = {
   baseUrl?: string;
   baseDir?: string;
@@ -45,37 +54,85 @@ export type ResolveContext = {
 };
 
 /**
- * Resolve an image reference against its HTML's location. Returns an absolute URL
- * for URL-based audits and an absolute filesystem path for folder-based audits.
+ * Resolve an image reference against its HTML's location.
+ * When baseDir is set, absolute http(s) URLs are mapped to local files by pathname
+ * when those files exist (local-first for folder audits).
  */
 export function resolveReference(
   reference: string,
   ctx: ResolveContext,
-): { resolved: string; external: boolean } {
+): { resolved: string; external: boolean; localPath?: string } {
   if (isDataUrl(reference)) return { resolved: reference, external: false };
-  if (reference.startsWith("//")) return { resolved: `https:${reference}`, external: true };
-  if (isAbsoluteUrl(reference)) return { resolved: reference, external: true };
 
+  if (reference.startsWith("//")) {
+    const https = `https:${reference}`;
+    const local = localFileForHttpUrl(https, ctx.baseDir);
+    if (local) return { resolved: local, external: false, localPath: local };
+    return { resolved: https, external: true };
+  }
+
+  if (isAbsoluteUrl(reference)) {
+    if (isHttpUrl(reference)) {
+      const local = localFileForHttpUrl(reference, ctx.baseDir);
+      if (local) return { resolved: local, external: false, localPath: local };
+    }
+    return { resolved: reference, external: true };
+  }
+
+  // Remote page audits: resolve relative refs against the page URL first.
   const urlBase = ctx.sourceUrl ?? ctx.baseUrl;
   if (urlBase) {
     try {
       return { resolved: new URL(reference, urlBase).toString(), external: true };
     } catch {
-      // The base URL is malformed; fall back to filesystem resolution below.
+      // fall through to filesystem
     }
   }
 
   // Root-relative paths anchor at the folder root, not the HTML file's directory.
   if (reference.startsWith("/") && ctx.baseDir) {
-    return { resolved: path.resolve(ctx.baseDir, "." + reference), external: false };
+    const resolved = path.resolve(ctx.baseDir, "." + reference);
+    return { resolved, external: false, localPath: resolved };
   }
 
   const dirBase = ctx.sourceFile ? path.dirname(ctx.sourceFile) : ctx.baseDir;
   if (dirBase) {
-    return { resolved: path.resolve(dirBase, reference), external: false };
+    const resolved = path.resolve(dirBase, reference);
+    return { resolved, external: false, localPath: resolved };
   }
 
   return { resolved: reference, external: false };
+}
+
+/**
+ * Map https://host/path/to/img.png → baseDir/path/to/img.png when the file exists.
+ * Also tries baseDir/public/<pathname> for Vite-style layouts.
+ */
+export function localFileForHttpUrl(url: string, baseDir?: string): string | null {
+  if (!baseDir) return null;
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(new URL(url).pathname);
+  } catch {
+    return null;
+  }
+  if (!pathname || pathname === "/") return null;
+
+  const candidates = [
+    path.resolve(baseDir, "." + pathname),
+    path.resolve(baseDir, "public", "." + pathname),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // try next
+    }
+  }
+  return null;
 }
 
 export function firstNonEmpty(...values: Array<string | null | undefined>): string | null {

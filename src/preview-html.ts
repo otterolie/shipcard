@@ -1,8 +1,8 @@
+import fs from "node:fs";
 import type {
   AuditReport,
   ImageAudit,
   PageReport,
-  Platform,
   PlatformField,
   PlatformPreview,
 } from "./types.js";
@@ -219,27 +219,27 @@ function renderSimplePreview(
   desc: string | null,
   host: string,
   platform: string,
-  layout: string,
+  _layout: string,
 ): string {
-  const hasImg = !!img;
-  // Simple aspect control via class for the few that benefit from tall (Pinterest) or square-ish (iMessage).
-  const isTall = platform === 'pinterest';
-  const isSquare = platform === 'imessage';
-  const imgClass = isTall ? 'preview-img-tall' : isSquare ? 'preview-img-square' : 'preview-img-standard';
+  const isTall = platform === "pinterest";
+  const isSquare = platform === "imessage";
+  const imgClass = isTall
+    ? "preview-img-tall"
+    : isSquare
+      ? "preview-img-square"
+      : "preview-img-standard";
 
-  const imgHtml = hasImg
+  const imgHtml = img
     ? `<div class="preview-img ${imgClass}">${imgEl(img)}</div>`
-    : '';
+    : "";
 
-  // Consistent body for all — host, title, optional desc.
-  // No per-platform fancy chrome (bars, overlays, exact app colors) — clarity over mimicry.
   return `
     <div class="preview">
       ${imgHtml}
       <div class="preview-body">
         <div class="preview-host">${escapeHtml(host)}</div>
         <div class="preview-title">${renderField(title)}</div>
-        ${desc ? `<div class="preview-desc">${escapeHtml(desc)}</div>` : ''}
+        ${desc ? `<div class="preview-desc">${escapeHtml(desc)}</div>` : ""}
       </div>
     </div>
   `;
@@ -347,32 +347,38 @@ function imgEl(src: string): string {
 
 function imageSrcFor(preview: PlatformPreview, audit: ImageAudit | null, embed: boolean): string | null {
   if (!preview.image.url) return null;
-  if (audit) return absoluteSrc(audit.resolvedSource, embed, audit);
-  return absoluteSrc(preview.image.url, embed);
+  if (audit) return absoluteSrc(audit.resolvedSource, embed, audit.contentType);
+  return absoluteSrc(preview.image.url, embed, null);
 }
 
-function absoluteSrc(value: string, embed = false, audit?: ImageAudit | null): string {
+function absoluteSrc(value: string, embed: boolean, contentType: string | null): string {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith("data:")) return value;
-  if (embed && audit && (audit as any).buffer) {
-    const b = (audit as any).buffer as Buffer;
-    const ct = audit.contentType || "image/png";
-    return `data:${ct};base64,${b.toString("base64")}`;
-  }
-  if (embed && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !value.startsWith("data:")) {
-    // Try to read local file at render time for embed (works for both resolved fs paths and relative)
+
+  // Embed local files as data: URIs so the preview HTML is portable.
+  if (embed && !value.startsWith("http://") && !value.startsWith("https://")) {
     try {
-      const fs = require("node:fs");
-      const p = value.startsWith("/") ? value : value; // resolvedSource is usually absolute for folder
-      if (fs.existsSync(p)) {
-        const b = fs.readFileSync(p);
-        // best effort content type
-        const ct = (audit && audit.contentType) || "image/png";
-        return `data:${ct};base64,${b.toString("base64")}`;
+      if (fs.existsSync(value) && fs.statSync(value).isFile()) {
+        const buf = fs.readFileSync(value);
+        const ct = contentType || guessContentType(value) || "image/png";
+        return `data:${ct};base64,${buf.toString("base64")}`;
       }
-    } catch {}
+    } catch {
+      // fall through
+    }
   }
+
   if (value.startsWith("/")) return `file://${value}`;
   return value;
+}
+
+function guessContentType(filePath: string): string | null {
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  if (ext === "svg") return "image/svg+xml";
+  return null;
 }
 
 function hostnameFor(page: PageReport): string {
