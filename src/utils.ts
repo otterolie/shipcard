@@ -1,5 +1,6 @@
 import { URL } from "node:url";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 
 export const RECOMMENDED_IMAGE_WIDTH = 1200;
@@ -7,6 +8,68 @@ export const RECOMMENDED_IMAGE_HEIGHT = 630;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+
+export const SKIP_DIR_NAMES = new Set([
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  "coverage",
+  ".cache",
+  ".turbo",
+  ".next",
+  ".nuxt",
+  ".vercel",
+  ".output",
+  "storybook-static",
+]);
+
+const ELSEWHERE_SEARCH_MAX_DIRS = 4000;
+
+/**
+ * Best-effort search for a file at `relativePath` anywhere under `searchRoot`,
+ * skipping `skipDir` (already tried) and common noise directories. Used to tell
+ * "genuinely missing" apart from "pointed shipcard at the wrong build output
+ * folder" when a reference doesn't resolve where expected. Bounded so a huge
+ * tree can't make a single missing-image warning expensive; returns null on
+ * any failure or once the search budget is exhausted.
+ */
+export async function findFileElsewhere(
+  searchRoot: string,
+  relativePath: string,
+  skipDir?: string,
+): Promise<string | null> {
+  const queue: string[] = [searchRoot];
+  let visited = 0;
+
+  while (queue.length > 0 && visited < ELSEWHERE_SEARCH_MAX_DIRS) {
+    const dir = queue.shift()!;
+    visited++;
+
+    if (dir !== skipDir) {
+      const candidate = path.join(dir, relativePath);
+      try {
+        const st = await fsp.stat(candidate);
+        if (st.isFile()) return candidate;
+      } catch {
+        // keep looking
+      }
+    }
+
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || SKIP_DIR_NAMES.has(entry.name)) continue;
+      queue.push(path.join(dir, entry.name));
+    }
+  }
+
+  return null;
+}
 
 export function isAbsoluteUrl(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith("//");
@@ -51,6 +114,8 @@ export type ResolveContext = {
   baseDir?: string;
   sourceUrl?: string;
   sourceFile?: string;
+  /** Folder originally passed to the scan, for the "found elsewhere in this tree" diagnostic. */
+  searchRoot?: string;
 };
 
 /**

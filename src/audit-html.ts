@@ -12,6 +12,8 @@ export type AuditHtmlOptions = AuditOptions & {
   path: string;
   sourceFile?: string;
   sourceUrl?: string;
+  /** Folder originally passed to the scan, for the "found elsewhere in this tree" diagnostic. */
+  searchRoot?: string;
 };
 
 /** Audit a single HTML document and produce a scored PageReport. */
@@ -24,6 +26,7 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
     baseDir: options.baseDir,
     sourceUrl: options.sourceUrl,
     sourceFile: options.sourceFile,
+    searchRoot: options.searchRoot,
     timeoutMs: options.timeoutMs,
     offline: options.offline,
   };
@@ -50,10 +53,14 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
         Number.isFinite(declaredH) &&
         (declaredW !== image.width || declaredH !== image.height)
       ) {
+        const smaller = image.width < declaredW || image.height < declaredH;
+        const hint = smaller
+          ? " The file is smaller than declared — likely capped by a smaller source image; check your image pipeline's upscale/enlargement setting."
+          : " The file is larger than declared — update the width/height meta tags to match.";
         warnings.push({
           severity: "warning",
           code: "og-image-dimensions-mismatch",
-          message: `og:image:width/height is ${declaredW}x${declaredH} but the file is ${image.width}x${image.height}.`,
+          message: `og:image:width/height is ${declaredW}x${declaredH} but the file is ${image.width}x${image.height}.${hint}`,
         });
       }
     }

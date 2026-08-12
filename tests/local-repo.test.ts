@@ -50,7 +50,10 @@ describe("local-first image resolution", () => {
     expect(page.image?.width).toBe(1);
     expect(page.image?.height).toBe(1);
     expect(page.warnings.some((w) => w.code === "og-image-local-map")).toBe(true);
-    expect(page.warnings.some((w) => w.code === "og-image-dimensions-mismatch")).toBe(true);
+    const mismatch = page.warnings.find((w) => w.code === "og-image-dimensions-mismatch");
+    expect(mismatch).toBeDefined();
+    // file (1x1) is smaller than declared (1200x630) — should point at the likely cause
+    expect(mismatch?.message).toContain("upscale");
     // readable check passes even though image is tiny
     expect(page.checks.find((c) => c.id === "image-readable")?.passed).toBe(true);
   });
@@ -119,6 +122,51 @@ describe("folder discovery", () => {
 
     const report = await auditFolder(dir, { validateImages: false });
     expect(report.pages.map((p) => p.path)).toEqual(["/index.html"]);
+  });
+
+  it("scopes root-relative image resolution to a nested client/ build output (split builds)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "shipcard-split-"));
+    await fs.mkdir(path.join(root, "dist", "client"), { recursive: true });
+    await fs.mkdir(path.join(root, "dist", "server"), { recursive: true });
+    await fs.writeFile(path.join(root, "dist", "client", "og.png"), TINY_PNG);
+    await fs.writeFile(
+      path.join(root, "dist", "client", "index.html"),
+      `<html><head>
+        <title>Home</title>
+        <meta property="og:title" content="Home"/>
+        <meta property="og:description" content="D"/>
+        <meta property="og:image" content="/og.png"/>
+        <meta name="twitter:card" content="summary_large_image"/>
+        <link rel="canonical" href="https://example.com/"/>
+      </head></html>`,
+    );
+
+    const report = await auditFolder(path.join(root, "dist"));
+    expect(report.pages.map((p) => p.path)).toEqual(["/client/index.html"]);
+    expect(report.pages[0].image?.found).toBe(true);
+    expect(report.pages[0].warnings.some((w) => w.code === "og-image-not-found")).toBe(false);
+  });
+
+  it("diagnoses a wrong-root miss for split shapes it doesn't recognize by name", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "shipcard-elsewhere-"));
+    await fs.mkdir(path.join(root, "weirdname", "img"), { recursive: true });
+    await fs.writeFile(path.join(root, "weirdname", "img", "og.png"), TINY_PNG);
+    await fs.writeFile(
+      path.join(root, "weirdname", "index.html"),
+      `<html><head>
+        <title>Home</title>
+        <meta property="og:title" content="Home"/>
+        <meta property="og:description" content="D"/>
+        <meta property="og:image" content="/img/og.png"/>
+        <meta name="twitter:card" content="summary_large_image"/>
+        <link rel="canonical" href="https://example.com/"/>
+      </head></html>`,
+    );
+
+    const report = await auditFolder(root);
+    const warning = report.pages[0].warnings.find((w) => w.code === "og-image-found-elsewhere");
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain("./weirdname/img/og.png");
   });
 });
 

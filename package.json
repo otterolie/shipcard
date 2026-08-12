@@ -1,6 +1,6 @@
 {
   "name": "@otterolie/shipcard",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Catch broken social cards before you ship. Local-first preflight for Open Graph, X, LinkedIn, Pinterest, WhatsApp, Telegram, Bluesky, Mastodon and more — score, fixes, and HTML previews. No uploads.",
   "keywords": [
     "open-graph",

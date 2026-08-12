@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { imageSize } from "image-size";
 import type { ImageAudit, Warning } from "./types.js";
 import {
+  findFileElsewhere,
   formatBytes,
   isDataUrl,
   isHttpUrl,
@@ -102,11 +104,22 @@ export async function validateImage(
         ? `${label} points at ${host} with no matching file in this folder. Skipped live fetch (--offline).`
         : `${label} is remote with no matching local file. Skipped live fetch (--offline).`,
     });
+    if (options.searchRoot) {
+      const pathname = safePathname(resolved);
+      const hint = pathname && (await elsewhereWarning(label, pathname, options.searchRoot, options.baseDir));
+      if (hint) warnings.push(hint);
+    }
     return audit;
   }
 
   const loaded = await loadImageBuffer(resolved, external, options, warnings, label);
-  if (!loaded) return audit;
+  if (!loaded) {
+    if (!external && source.startsWith("/") && options.searchRoot) {
+      const hint = await elsewhereWarning(label, source, options.searchRoot, options.baseDir);
+      if (hint) warnings.push(hint);
+    }
+    return audit;
+  }
 
   audit.found = true;
   audit.sizeBytes = loaded.buffer.length;
@@ -157,6 +170,38 @@ export async function validateImage(
   }
 
   return audit;
+}
+
+/**
+ * When a reference doesn't resolve where expected, check whether a file with the same
+ * relative path exists elsewhere under the originally-scanned folder — usually a sign
+ * shipcard was pointed at the wrong build output folder rather than a genuinely broken
+ * image. `relativePath` may be root-relative ("/img/og.png") or a bare pathname.
+ */
+async function elsewhereWarning(
+  label: string,
+  relativePath: string,
+  searchRoot: string,
+  skipDir?: string,
+): Promise<Warning | null> {
+  const clean = relativePath.replace(/^\/+/, "");
+  if (!clean) return null;
+  const found = await findFileElsewhere(searchRoot, clean, skipDir);
+  if (!found) return null;
+  const display = "./" + path.relative(searchRoot, found).split(path.sep).join("/");
+  return {
+    severity: "warning",
+    code: "og-image-found-elsewhere",
+    message: `${label} has no matching file at that path here, but a file exists at ${display}. This folder may not be your site's real root (e.g. a split client/server build) — try pointing shipcard at that subfolder.`,
+  };
+}
+
+function safePathname(url: string): string | null {
+  try {
+    return decodeURIComponent(new URL(url).pathname);
+  } catch {
+    return null;
+  }
 }
 
 function safeHost(url: string): string | null {

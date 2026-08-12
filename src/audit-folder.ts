@@ -3,25 +3,19 @@ import path from "node:path";
 import { auditHtml } from "./audit-html.js";
 import { buildReport } from "./report.js";
 import { VERSION } from "./version.js";
+import { SKIP_DIR_NAMES } from "./utils.js";
 import type { AuditOptions, AuditReport, PageReport } from "./types.js";
 
 /** Top-level dirs we auto-scan when the target folder itself has no HTML. */
 const BUILD_DIR_NAMES = ["dist", "out", "build", "public", ".output", "export"];
 
-const SKIP_DIR_NAMES = new Set([
-  "node_modules",
-  ".git",
-  ".svn",
-  ".hg",
-  "coverage",
-  ".cache",
-  ".turbo",
-  ".next",
-  ".nuxt",
-  ".vercel",
-  ".output",
-  "storybook-static",
-]);
+/**
+ * Subfolder names that hold the real static output in a split client/server build
+ * (Astro's node adapter, Next.js `standalone` output, SvelteKit's adapter-node all
+ * nest the deployable static site one level below the folder you'd naturally point
+ * shipcard at).
+ */
+const SPLIT_OUTPUT_DIR_NAMES = new Set(["client", "public", "static", "www"]);
 
 export class NoHtmlFilesError extends Error {
   constructor(folder: string, hint?: string) {
@@ -63,7 +57,7 @@ export async function auditFolder(
       if (seen.has(logical)) continue;
       seen.add(logical);
       // Resolve assets against the scan root (dist/public), not the monorepo root
-      pages.push(await auditOnePage(full, logical, root, options));
+      pages.push(await auditOnePage(full, logical, root, absFolder, options));
     }
   }
 
@@ -86,7 +80,11 @@ export async function auditFolder(
  */
 async function resolveScanRoots(absFolder: string): Promise<string[]> {
   const direct = await listHtmlFiles(absFolder);
-  if (direct.length > 0) return [absFolder];
+  if (direct.length > 0) {
+    const splitRoots = splitOutputRootsFor(absFolder, direct);
+    if (splitRoots) return splitRoots;
+    return [absFolder];
+  }
 
   const roots: string[] = [];
   for (const name of BUILD_DIR_NAMES) {
@@ -101,6 +99,26 @@ async function resolveScanRoots(absFolder: string): Promise<string[]> {
     }
   }
   return roots;
+}
+
+/**
+ * If every HTML file found under the scanned folder lives inside one of the known
+ * split-output subfolder names (client/, public/, static/, www/), treat those
+ * subfolders as the real site roots instead of the flat outer folder. Root-relative
+ * asset paths (og:image="/x.png") need to resolve against the true site root, not an
+ * outer build directory that also holds server-only bundles with no meaning for local
+ * file resolution. Returns null (don't override) when HTML also exists outside those
+ * named subfolders — mixed shapes aren't worth guessing about.
+ */
+function splitOutputRootsFor(absFolder: string, relativeHtmlPaths: string[]): string[] | null {
+  const topSegments = new Set<string>();
+  for (const rel of relativeHtmlPaths) {
+    const first = rel.split(path.sep)[0];
+    if (!SPLIT_OUTPUT_DIR_NAMES.has(first)) return null;
+    topSegments.add(first);
+  }
+  if (topSegments.size === 0) return null;
+  return [...topSegments].sort().map((seg) => path.join(absFolder, seg));
 }
 
 async function missingHtmlHint(absFolder: string): Promise<string | undefined> {
@@ -147,6 +165,7 @@ async function auditOnePage(
   file: string,
   logicalPath: string,
   baseDir: string,
+  searchRoot: string,
   options: AuditOptions,
 ): Promise<PageReport> {
   try {
@@ -156,6 +175,7 @@ async function auditOnePage(
       path: logicalPath,
       sourceFile: file,
       baseDir,
+      searchRoot,
       validateImages: options.validateImages,
       timeoutMs: options.timeoutMs,
       offline: options.offline,

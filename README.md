@@ -2,7 +2,7 @@
 
 Checks that your Open Graph / Twitter / social meta tags actually work before you ship. Point it at `./dist` or `http://localhost:3000` — it reads the HTML, checks images, scores the page, and tells you what to fix.
 
-Against a local folder it does as much as possible on disk: walks every HTML page (or auto-picks `dist` / `out` / `build` / `public` if you point at the repo root), resolves `og:image` / `twitter:image` to files in the tree when the path matches (even if the tag uses a production `https://…` URL), and flags relative/localhost URLs, missing alts, and dimension mismatches.
+Against a local folder it does as much as possible on disk: walks every HTML page (or auto-picks `dist` / `out` / `build` / `public` if you point at the repo root — and one level deeper into `client` / `public` / `static` / `www` for split builds like Astro's node adapter, Next.js `standalone` output, or SvelteKit's adapter-node), resolves `og:image` / `twitter:image` to files in the tree when the path matches (even if the tag uses a production `https://…` URL), and flags relative/localhost URLs, missing alts, and dimension mismatches.
 
 If an absolute image URL points at a **different host** with no file in the folder, shipcard says so clearly — that check hits the live URL, not your tree. For pre-launch QA use `--offline`.
 
