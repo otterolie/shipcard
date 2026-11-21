@@ -9,11 +9,6 @@ import type {
   Warning,
 } from "./types.js";
 
-/**
- * Per-platform link-preview rules. Approximates documented behaviour —
- * real feeds vary by viewport, locale, A/B tests, and cache state.
- */
-
 type TitleSource = "og:title" | "twitter:title" | "<title>";
 type DescriptionSource = "og:description" | "twitter:description" | "meta description";
 type ImageSource = "og:image" | "twitter:image";
@@ -32,7 +27,6 @@ type PlatformRule = {
   label: string;
   titleChain: TitleSource[];
   titleLimit: number;
-  /** null = platform shows no description (iMessage). */
   descChain: DescriptionSource[] | null;
   descLimit?: number;
   imageChain: ImageSource[];
@@ -67,13 +61,13 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "warning",
           code: "meta-image-too-small",
-          message: "Meta will fall back to a text-only card — image is below 200x200.",
+          message: "Meta requires an image of at least 200x200; smaller or broken images fall back to text-only.",
         });
       } else if (img.url && !img.rendersAsLarge) {
         w.push({
           severity: "info",
           code: "meta-image-small-card",
-          message: "Meta will render a small (thumbnail) card — image is below 600x315.",
+          message: "Meta uses a small thumbnail card below 600x315.",
         });
       }
       return w;
@@ -88,7 +82,7 @@ const RULES: PlatformRule[] = [
     descLimit: 256,
     imageChain: OG_IMG,
     dims: { minW: 200, minH: 200, largeW: 1200, largeH: 200 },
-    layout: ({ img }) => cardLayoutBasic(img, "summary"),
+    layout: ({ img }) => cardLayoutBasic(img, "none"),
     extraWarnings: ({ title, img }) => {
       const w: Warning[] = [];
       if (!title.value) w.push(missing("og:title", "warning"));
@@ -96,19 +90,19 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "warning",
           code: "linkedin-no-image",
-          message: "LinkedIn will render a text-only card — og:image is missing.",
+          message: "LinkedIn renders a text-only card without og:image.",
         });
       } else if (!img.rendersAsLarge) {
         w.push({
           severity: "warning",
           code: "linkedin-image-too-small",
-          message: "LinkedIn recommends at least 1200x627 — smaller images may not render the large card.",
+          message: "LinkedIn recommends at least 1200x627 for the large card layout.",
         });
       }
       w.push({
         severity: "info",
         code: "linkedin-cache",
-        message: "LinkedIn caches previews for ~7 days. Use Post Inspector to refresh after deploying changes.",
+        message: "LinkedIn caches link previews for about 7 days (use Post Inspector to refresh).",
       });
       return w;
     },
@@ -130,13 +124,13 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "warning",
           code: "pinterest-no-image",
-          message: "Pinterest is visual-first — og:image is missing. Cards will be weak or text-only.",
+          message: "Pinterest requires og:image to render a pin preview.",
         });
       } else if (!img.rendersAsLarge) {
         w.push({
           severity: "warning",
           code: "pinterest-image-not-vertical",
-          message: "Pinterest strongly prefers tall 2:3 images (~1000x1500). Landscape or small images get less distribution.",
+          message: "Pinterest prefers tall 2:3 images (around 1000x1500).",
         });
       }
       return w;
@@ -171,7 +165,7 @@ const RULES: PlatformRule[] = [
     dims: { minW: 1, minH: 1, largeW: 1, largeH: 1 },
     layout: ({ meta, img, title }) => {
       const wantsLarge = meta.twitterCard?.toLowerCase() === "summary_large_image";
-      if (img.url) return wantsLarge ? "large" : "inline";
+      if (img.url && img.meetsMinimum) return wantsLarge ? "large" : "inline";
       return title.value ? "inline" : "none";
     },
     extraWarnings: ({ meta, title, img }) => {
@@ -182,8 +176,7 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "info",
           code: "discord-small-embed",
-          message:
-            'Discord renders a small thumbnail by default. Set twitter:card="summary_large_image" for a hero image embed.',
+          message: 'Set twitter:card="summary_large_image" for a full-width Discord embed image.',
         });
       }
       return w;
@@ -198,7 +191,7 @@ const RULES: PlatformRule[] = [
     descLimit: 120,
     imageChain: OG_IMG,
     dims: { minW: 300, minH: 200, largeW: 1200, largeH: 630 },
-    layout: ({ img, title }) => (img.url ? "large" : title.value ? "inline" : "none"),
+    layout: ({ img, title }) => (img.url && img.meetsMinimum ? "large" : title.value ? "inline" : "none"),
     extraWarnings: ({ title, img, image }) => {
       const w: Warning[] = [];
       if (!title.value) w.push(missing("og:title", "warning"));
@@ -206,7 +199,7 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "warning",
           code: "whatsapp-image-too-large",
-          message: "WhatsApp prefers og:image under 600 KB. Larger images may fail to preview or load slowly.",
+          message: "WhatsApp prefers og:image under 600 KB; larger files may fail to preview.",
         });
       }
       return w;
@@ -257,8 +250,7 @@ const RULES: PlatformRule[] = [
       w.push({
         severity: "info",
         code: "mastodon-cache",
-        message:
-          "Mastodon instances cache link previews. Use your instance's 'preview card' refresh or post again after changes.",
+        message: "Mastodon instances cache link previews after first fetch.",
       });
       return w;
     },
@@ -279,7 +271,7 @@ const RULES: PlatformRule[] = [
         w.push({
           severity: "info",
           code: "imessage-image-small",
-          message: "iMessage prefers images of at least 144x144 — smaller images may not render.",
+          message: "iMessage prefers images of at least 144x144.",
         });
       }
       return w;
@@ -287,29 +279,34 @@ const RULES: PlatformRule[] = [
   },
 ];
 
-/** Build the platform preview for every supported platform. */
+/** Build approximate link previews for all supported platforms. */
 export function platformPreviews(
   meta: SocialMeta,
   image: ImageAudit | null,
+  images?: ImageAudit[],
 ): PlatformPreview[] {
-  // meta, linkedin, then X (special-cased), then the rest of RULES
   const [metaRule, linkedinRule, ...rest] = RULES;
   return [
-    applyRule(metaRule, meta, image),
-    applyRule(linkedinRule, meta, image),
-    previewX(meta, image),
-    ...rest.map((rule) => applyRule(rule, meta, image)),
+    applyRule(metaRule, meta, image, images),
+    applyRule(linkedinRule, meta, image, images),
+    previewX(meta, image, images),
+    ...rest.map((rule) => applyRule(rule, meta, image, images)),
   ];
 }
 
-function applyRule(rule: PlatformRule, meta: SocialMeta, image: ImageAudit | null): PlatformPreview {
+function applyRule(
+  rule: PlatformRule,
+  meta: SocialMeta,
+  image: ImageAudit | null,
+  images?: ImageAudit[],
+): PlatformPreview {
   const title = pickTitle(meta, rule.titleChain, rule.titleLimit);
   const description =
     rule.descChain == null
       ? emptyField()
       : pickDescription(meta, rule.descChain, rule.descLimit ?? 200);
-  const img = pickImage(meta, image, rule.imageChain, rule.dims);
-  const ctx: PreviewCtx = { meta, image, title, description, img };
+  const { img, probe } = pickImage(meta, image, images, rule.imageChain, rule.dims);
+  const ctx: PreviewCtx = { meta, image: probe, title, description, img };
   return {
     platform: rule.platform,
     label: rule.label,
@@ -323,8 +320,11 @@ function applyRule(rule: PlatformRule, meta: SocialMeta, image: ImageAudit | nul
   };
 }
 
-// X is special-cased: twitter:card drives minimum dims and layout.
-function previewX(meta: SocialMeta, image: ImageAudit | null): PlatformPreview {
+function previewX(
+  meta: SocialMeta,
+  image: ImageAudit | null,
+  images?: ImageAudit[],
+): PlatformPreview {
   const title = pickTitle(meta, ["twitter:title", "og:title", "<title>"], 70);
   const description = pickDescription(
     meta,
@@ -335,7 +335,7 @@ function previewX(meta: SocialMeta, image: ImageAudit | null): PlatformPreview {
   const declaredCard = meta.twitterCard?.toLowerCase();
   const wantsLarge = declaredCard === "summary_large_image";
   const minDims = wantsLarge ? { minW: 300, minH: 157 } : { minW: 144, minH: 144 };
-  const img = pickImage(meta, image, ["twitter:image", "og:image"], {
+  const { img } = pickImage(meta, image, images, ["twitter:image", "og:image"], {
     ...minDims,
     largeW: wantsLarge ? 300 : 9999,
     largeH: wantsLarge ? 157 : 9999,
@@ -346,8 +346,7 @@ function previewX(meta: SocialMeta, image: ImageAudit | null): PlatformPreview {
     warnings.push({
       severity: "warning",
       code: "x-missing-card",
-      message:
-        'X expects twitter:card. Set it to "summary_large_image" for the hero layout or "summary" for a thumbnail card.',
+      message: 'X expects twitter:card ("summary_large_image" or "summary").',
     });
   } else if (
     declaredCard !== "summary" &&
@@ -358,14 +357,14 @@ function previewX(meta: SocialMeta, image: ImageAudit | null): PlatformPreview {
     warnings.push({
       severity: "warning",
       code: "x-unknown-card",
-      message: `twitter:card="${declaredCard}" is not a recognised X card type.`,
+      message: `twitter:card="${declaredCard}" is not a valid X card type.`,
     });
   }
   if (wantsLarge && img.url && !img.meetsMinimum) {
     warnings.push({
       severity: "warning",
       code: "x-image-too-small",
-      message: "summary_large_image requires at least 300x157 — X will fall back to a smaller layout.",
+      message: "summary_large_image requires a valid raster image of at least 300x157.",
     });
   }
 
@@ -433,16 +432,17 @@ function emptyField(): PlatformField {
 
 function pickImage(
   meta: SocialMeta,
-  image: ImageAudit | null,
+  primaryImage: ImageAudit | null,
+  images: ImageAudit[] | undefined,
   chain: ImageSource[],
   dims: ImageDims,
-): PlatformImage {
+): { img: PlatformImage; probe: ImageAudit | null } {
   let chosenSource: ImageSource | null = null;
   let url: string | null = null;
   for (const source of chain) {
     const v =
       source === "og:image"
-        ? meta.raw.openGraph["image"]?.[0]
+        ? (meta.raw.openGraph["image"]?.[0] ?? meta.raw.openGraph["image:url"]?.[0])
         : meta.raw.twitter["image"]?.[0];
     if (v) {
       chosenSource = source;
@@ -451,16 +451,36 @@ function pickImage(
     }
   }
 
-  // Probe data is shared across og/twitter image when sites use the same asset.
-  const haveProbe =
-    image !== null && image.found && image.width !== null && image.height !== null;
+  const probe = !url
+    ? null
+    : images !== undefined
+      ? (images.find((i) => i.source === url) ?? null)
+      : primaryImage;
 
-  const meetsMinimum = haveProbe ? image!.width! >= dims.minW && image!.height! >= dims.minH : !!url;
-  const rendersAsLarge = haveProbe
-    ? image!.width! >= dims.largeW && image!.height! >= dims.largeH
-    : false;
+  if (!url) {
+    return {
+      img: { url: null, source: null, meetsMinimum: false, rendersAsLarge: false },
+      probe: null,
+    };
+  }
 
-  return { url, source: chosenSource, meetsMinimum, rendersAsLarge };
+  if (probe === null) {
+    // Image validation was skipped (--no-images); assume present URL is usable.
+    return {
+      img: { url, source: chosenSource, meetsMinimum: true, rendersAsLarge: false },
+      probe: null,
+    };
+  }
+
+  const isRaster = probe.format !== "svg" && probe.contentType !== "image/svg+xml";
+  const decoded = probe.found && probe.width !== null && probe.height !== null && isRaster;
+  const meetsMinimum = decoded && probe.width! >= dims.minW && probe.height! >= dims.minH;
+  const rendersAsLarge = decoded && probe.width! >= dims.largeW && probe.height! >= dims.largeH;
+
+  return {
+    img: { url, source: chosenSource, meetsMinimum, rendersAsLarge },
+    probe,
+  };
 }
 
 function cardLayoutBasic(image: PlatformImage, empty: CardLayout): CardLayout {

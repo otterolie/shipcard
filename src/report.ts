@@ -1,7 +1,6 @@
 import { summarize } from "./summarize.js";
 import type { AuditReport, PageReport, TargetType } from "./types.js";
 
-/** Build a complete AuditReport from audited pages. */
 export function buildReport(
   pages: PageReport[],
   opts: { version: string; type: TargetType; input: string },

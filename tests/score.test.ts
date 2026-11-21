@@ -44,22 +44,20 @@ describe("scorePage", () => {
   });
 
   it("only credits the no-duplicate-tags check for empty metadata", () => {
-    // An empty document has no tags, therefore no duplicates — the only
-    // check that passes is "no duplicate core tags" (weight 5).
     const { score, checks } = scorePage(emptyMeta(), null);
     expect(score).toBe(5);
     const passed = checks.filter((c) => c.passed).map((c) => c.id);
     expect(passed).toEqual(["no-duplicate-core-tags"]);
   });
 
-  it("dings score by 10 for an undersized image", () => {
+  it("deducts 10 for an undersized image", () => {
     const meta = fullMeta();
     const img: ImageAudit = { ...goodImage(), width: 800, height: 420 };
     const { score } = scorePage(meta, img);
     expect(score).toBe(90);
   });
 
-  it("dings 15 + 10 when image is unreadable (no width/height)", () => {
+  it("deducts 15 + 10 when image is unreadable", () => {
     const meta = fullMeta();
     const img: ImageAudit = {
       ...goodImage(),
@@ -68,11 +66,21 @@ describe("scorePage", () => {
       height: null,
     };
     const { score } = scorePage(meta, img);
-    // -15 (readable) -10 (dimensions) = -25
     expect(score).toBe(75);
   });
 
-  it("dings 5 when duplicate core tags exist", () => {
+  it("deducts 15 + 10 for SVG images", () => {
+    const meta = fullMeta();
+    const img: ImageAudit = {
+      ...goodImage(),
+      contentType: "image/svg+xml",
+      format: "svg",
+    };
+    const { score } = scorePage(meta, img);
+    expect(score).toBe(75);
+  });
+
+  it("deducts 5 when duplicate core tags exist", () => {
     const meta = extractMeta(`
       <html><head>
         <title>T</title>
@@ -92,21 +100,19 @@ describe("scorePage", () => {
   it("only counts og:title for the og-title check (not the <title> fallback)", () => {
     const meta = extractMeta(`<html><head><title>T</title></head></html>`);
     const { checks } = scorePage(meta, null);
-    const titleCheck = checks.find((c) => c.id === "title");
-    const ogTitleCheck = checks.find((c) => c.id === "og-title");
-    expect(titleCheck?.passed).toBe(true);
-    expect(ogTitleCheck?.passed).toBe(false);
+    expect(checks.find((c) => c.id === "title")?.passed).toBe(true);
+    expect(checks.find((c) => c.id === "og-title")?.passed).toBe(false);
   });
 });
 
 describe("statusFromScore", () => {
-  it("classifies 90+ as ready", () => {
-    expect(statusFromScore(100)).toBe("ready");
-    expect(statusFromScore(90)).toBe("ready");
+  it("classifies 90+ as pass", () => {
+    expect(statusFromScore(100)).toBe("pass");
+    expect(statusFromScore(90)).toBe("pass");
   });
-  it("classifies 70-89 as warning", () => {
-    expect(statusFromScore(89)).toBe("warning");
-    expect(statusFromScore(70)).toBe("warning");
+  it("classifies 70-89 as warn", () => {
+    expect(statusFromScore(89)).toBe("warn");
+    expect(statusFromScore(70)).toBe("warn");
   });
   it("classifies below 70 as fail", () => {
     expect(statusFromScore(69)).toBe("fail");

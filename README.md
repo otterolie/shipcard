@@ -1,209 +1,143 @@
 # shipcard
 
-Checks that your Open Graph / Twitter / social meta tags actually work before you ship. Point it at `./dist` or `http://localhost:3000` — it reads the HTML, checks images, scores the page, and tells you what to fix.
-
-Against a local folder it does as much as possible on disk: walks every HTML page (or auto-picks `dist` / `out` / `build` / `public` if you point at the repo root), resolves `og:image` / `twitter:image` to files in the tree when the path matches (even if the tag uses a production `https://…` URL), and flags relative/localhost URLs, missing alts, and dimension mismatches.
-
-Split builds — Astro's node adapter, Next.js `standalone` output, SvelteKit's adapter-node — nest the real static site one level deeper under `client` / `public` / `static` / `www`, alongside server-only bundles. shipcard auto-descends into that subfolder when it finds one, so `shipcard ./dist` resolves images correctly even when `./dist` itself isn't the site root. If it ever picks the wrong folder anyway, a leak will say so directly and point at the folder that actually has the matching file.
-
-If an absolute image URL points at a **different host** with no file in the folder, shipcard says so clearly — that check hits the live URL, not your tree. For pre-launch QA use `--offline`.
-
-No SaaS, no headless browser. Just Node looking at your tags and files.
+Checks your Open Graph, Twitter, and social link preview tags before you ship. Point it at a build folder (`./dist`), a single `.html` file, stdin (`-`), or a live URL (`http://localhost:3000`).
 
 ```bash
 npx @otterolie/shipcard ./dist
 ```
 
-## Usage
-
-```bash
-# built site
-npx @otterolie/shipcard ./dist
-npx @otterolie/shipcard ./out
-
-# pre-launch: only check files in the folder (no live image fetches)
-npx @otterolie/shipcard ./dist --offline
-
-# running app
-npx @otterolie/shipcard http://localhost:3000
-
-# CI — careful with --fail-below before deploy (see below)
-npx @otterolie/shipcard ./dist --offline --fail-below 85
-npx @otterolie/shipcard ./dist --json > report.json
-
-# HTML mockups of every platform card (handy in a PR)
-npx @otterolie/shipcard ./dist --preview
-npx @otterolie/shipcard ./dist --preview cards.html --embed
-```
-
-You can also pass a single `.html` file, or `-` for stdin.
-
-Install as a devDependency if you prefer:
+Or install it as a dev dependency:
 
 ```bash
 npm i -D @otterolie/shipcard
 ```
 
-### Pre-launch / CI note
+## Usage
 
-If your HTML already has absolute `og:image` URLs like `https://yoursite.com/og.png` but that site **isn’t deployed yet**, a normal image check will hit production and 404 — even when a fine `og.png` sits in `./dist`. That makes naive `--fail-below 80` flap.
+```bash
+# Audit a built site
+npx @otterolie/shipcard ./dist
 
-Use one of:
+# Pre-launch check: resolve image paths on disk, skip remote fetches
+npx @otterolie/shipcard ./dist --offline
 
-- `--offline` — map URL paths onto the local folder when possible; **never** fetch remotes
-- `--no-images` — skip image fetch/decode entirely (tags + platforms only)
+# Audit a running dev server or deployed page
+npx @otterolie/shipcard http://localhost:3000
 
-After deploy, drop `--offline` so live URLs get a real fetch.
+# Audit a single HTML file or stdin
+npx @otterolie/shipcard ./dist/index.html
+cat dist/index.html | npx @otterolie/shipcard -
 
-## What it looks for
+# CI gate and JSON output
+npx @otterolie/shipcard ./dist --offline --fail-below 85
+npx @otterolie/shipcard ./dist --offline --json > report.json
 
-On each page it pulls the usual tags (`title`, description, `og:*`, `twitter:*`, canonical), tries to load every distinct social image, and runs a weighted score out of 100.
+# Generate a standalone HTML preview of all platform cards
+npx @otterolie/shipcard ./dist --preview
+npx @otterolie/shipcard ./dist --preview cards.html --embed
+```
 
-Common failures it calls out:
+### Pre-launch note
 
-- missing `og:title` / `og:description` / `og:image`
-- localhost or relative `og:url` / canonical
-- relative or plain `http://` image URLs
-- image missing, unreadable, under 1200×630, or over 5 MB
-- declared `og:image:width`/`height` don't match the file's real dimensions — e.g. a source photo too small to upscale, so the build silently shipped an undersized card
-- image reference resolves to nothing here, but a file with the same path exists elsewhere in the folder — usually the wrong build output folder was scanned
-- external image hosts when scanning a folder (live check, not local file)
-- the same core tag declared twice
+If your HTML already references production image URLs like `https://example.com/og.png` before the site is deployed, shipcard maps matching paths onto your local build folder automatically. For images that do not exist locally, a live fetch will 404 unless you pass:
 
-When something’s wrong you get a fix list with copy-paste snippets. Multi-page scans **group identical leaks** (“54 pages share this…”) instead of repeating the same block.
+- `--offline` to resolve local files and skip remote fetches
+- `--no-images` to skip image validation altogether
 
-## Score
+After deploy, drop `--offline` to verify live URLs over HTTP.
+
+## What it checks
+
+For each page, shipcard extracts `<title>`, `<meta name="description">`, `og:*`, `twitter:*`, and `<link rel="canonical">`, validates referenced social images (`og:image` and `twitter:image`), and reports:
+
+- Missing `og:title`, `og:description`, `og:image`, `twitter:card`, or canonical tags
+- Localhost or relative `og:url`, `canonical`, and `og:image` URLs
+- Plain `http://` image URLs
+- Missing, undecodable, SVG, data-URI, undersized (`< 1200x630`), or oversized (`> 5 MB`) images
+- Mismatches between declared `og:image:width`/`height` and actual image dimensions
+- Missing images that exist under another subfolder (common when scanning the wrong build directory)
+- Duplicate core meta tags
+
+Folder scans auto-detect standard build directories (`dist`, `out`, `build`, `public`, `.output`, `export`) when run from a repo root, and auto-descend into split client/server output directories (`client`, `public`, `static`, `www`) used by Astro, Next.js standalone, Nuxt, and SvelteKit. Multi-page reports group identical issues across pages.
+
+## Scoring
 
 | Check | Points |
 | --- | ---: |
-| title | 10 |
-| description | 10 |
-| og:title | 10 |
-| og:description | 10 |
-| og:image | 20 |
-| image loads + decodes | 15 |
-| image ≥ 1200×630 | 10 |
-| twitter:card | 5 |
-| canonical | 5 |
-| no duplicate core tags | 5 |
+| `title` | 10 |
+| `description` | 10 |
+| `og:title` | 10 |
+| `og:description` | 10 |
+| `og:image` | 20 |
+| Image loads and decodes (raster) | 15 |
+| Image at least 1200x630 | 10 |
+| `twitter:card` | 5 |
+| Canonical link | 5 |
+| No duplicate core tags | 5 |
 
-90+ ready · 70–89 minor leaks · under 70 blocked. For a folder, the fleet score is the average of the pages.
+- `90-100`: Pass
+- `70-89`: Warn
+- `0-69`: Fail
+
+Folder scores are the rounded mean across scanned pages.
 
 ## Platforms
 
-It also simulates how Meta, LinkedIn, X, Pinterest, Slack, Discord, WhatsApp, Telegram, Bluesky, Mastodon, and iMessage would build a card — field priority, truncation, image size rules. Terminal output includes a short **why** on ⚠/✕ rows (e.g. image too small for large layout). Full mockups still live under `--preview`.
+Simulates fallback chains, title/description truncation, and image size rules for:
 
-Gotchas worth knowing:
+Meta (Facebook), LinkedIn, X (Twitter), Pinterest, Slack, Discord, WhatsApp, Telegram, Bluesky, Mastodon, and iMessage.
 
-- **X** wants `twitter:card` (`summary_large_image` for the big one)
-- **LinkedIn** only reads OG tags and caches hard (~7 days)
-- **WhatsApp** is picky about image size (aim under 600 KB)
-- **Pinterest** likes tall 2:3 images
-- **Discord** uses `summary_large_image` for a large embed
+Platform quirks to keep in mind:
+
+- **X** requires `twitter:card` (`summary_large_image` for a large card)
+- **LinkedIn** reads Open Graph tags only and caches previews for ~7 days
+- **WhatsApp** prefers images under 600 KB
+- **Pinterest** prefers vertical 2:3 images (~1000x1500)
+- **Discord** uses `twitter:card="summary_large_image"` for a full-width embed image
 
 ## Options
 
-```
---json                 print JSON only
---fail-below <n>       exit 1 if score < n
---preview [file]       write HTML card mockups (default: shipcard-preview.html)
---embed                with --preview, inline local images as data: URIs
---offline              don't fetch remote images (local path maps only)
---no-images            skip image fetch/decode entirely
---timeout <ms>         network timeout
---output <file>        write the report to a file
---watch                re-run when files change
-```
+| Flag | Description |
+| --- | --- |
+| `--json` | Print the report as JSON |
+| `--fail-below <n>` | Exit 1 if the overall score is below `n` (0-100) |
+| `--timeout <ms>` | Network fetch timeout in milliseconds |
+| `--no-images` | Skip image loading and dimension checks |
+| `--offline` | Only check local files and local path mappings; never fetch remote images |
+| `--preview [file]` | Write an HTML preview report (default: `shipcard-preview.html`) |
+| `--embed` | With `--preview`, inline local images as `data:` URIs |
+| `--output <file>` | Write the report (JSON or plain text) to a file |
+| `--watch` | Re-run when local target files change |
+| `-h, --help` | Show help |
+| `-V, --version` | Show version |
 
-## Library
+## Library API
 
 ```ts
 import fs from "node:fs/promises";
 import {
   audit,
-  advise,
   fixesForPage,
   applyFixes,
   renderTerminal,
+  renderPreviewHtml,
 } from "@otterolie/shipcard";
 
 const report = await audit("./dist", { offline: true });
 console.log(renderTerminal(report));
 
-const fixes = fixesForPage(report.pages[0], report);
+const page = report.pages[0];
+const fixes = fixesForPage(page, report);
 const html = await fs.readFile("dist/index.html", "utf8");
 await fs.writeFile("dist/index.html", applyFixes(html, fixes));
 ```
 
-Also exported: `auditHtml`, `auditUrl`, `auditFolder`, `extractMeta`, `scorePage`, `platformPreviews`, `renderPreviewHtml`, `planFromReport`, `version`, and the report types.
-
-## For coding agents / LLMs
-
-Shipcard is meant to be the social-card step in an agent loop: scan the build, get a ranked todo list, patch templates, re-run.
-
-**CLI (preferred for tools):**
-
-```bash
-npx @otterolie/shipcard ./dist --offline --json
-```
-
-JSON always includes `plan`:
-
-```json
-{
-  "summary": { "score": 62, "pagesScanned": 12, "ready": 2, "warnings": 4, "failed": 6 },
-  "pages": [ "…" ],
-  "plan": {
-    "summary": "Fleet score 62/100 … Top action: Add a 1200×630 og:image …",
-    "actions": [
-      {
-        "priority": 1,
-        "impact": 180,
-        "title": "Add a 1200×630 og:image",
-        "why": "…",
-        "how": "Apply on all 12 affected pages…",
-        "snippet": "<meta property=\"og:image\" content=\"https://yoursite.com/og.png\">",
-        "pages": ["/index.html", "/pricing.html"],
-        "files": ["/abs/path/dist/index.html"]
-      }
-    ],
-    "pages": [{ "path": "/index.html", "file": "…", "score": 55, "issues": ["…"], "actionIds": ["…"] }],
-    "next": ["Start with file: …", "After edits, rebuild… and re-run: shipcard ./dist --offline --json"]
-  }
-}
-```
-
-**Programmatic:**
-
-```ts
-import { advise, applyFixes, fixesForPage } from "@otterolie/shipcard";
-import fs from "node:fs/promises";
-
-const { report, plan } = await advise("./dist"); // offline by default for folders
-console.log(plan.summary);
-
-for (const action of plan.actions) {
-  // action.files / action.pages / action.snippet / action.how
-}
-
-// Patch one HTML file when you have a concrete path:
-const page = report.pages[0];
-const html = await fs.readFile(page.source, "utf8");
-await fs.writeFile(page.source, applyFixes(html, fixesForPage(page, report)));
-```
-
-Agent tips:
-
-1. Prefer `./dist` (or `./out` / `./build`) over source — shipcard reads **built HTML**.
-2. Use `--offline` (or `advise()`) before deploy so production image URLs don’t 404.
-3. Follow `plan.actions` in order; re-run after each meaningful change.
-4. Framework apps: fix the metadata API / layout that emits tags, not only a one-off HTML file.
+Also exported: `auditHtml`, `auditUrl`, `auditFolder`, `extractMeta`, `scorePage`, `statusFromScore`, `validateImage`, `platformPreviews`, `fixBundle`, `summarize`, `NoHtmlFilesError`, `version`, and TypeScript report types.
 
 ## Limits
 
-- Doesn’t run your JS or open a real browser — static HTML only
-- Doesn’t upload anything
-- Platform mockups are approximate; production UIs move around
+- Inspects static HTML only (does not execute JavaScript or launch a browser)
+- Platform previews approximate documented rules; live feeds change frequently
 
 ## License
 

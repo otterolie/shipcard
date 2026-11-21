@@ -7,8 +7,10 @@ import {
   formatBytes,
   isDataUrl,
   isHttpUrl,
+  isLocalhostUrl,
   isRelativeReference,
   resolveReference,
+  stripQueryAndHash,
   MAX_IMAGE_BYTES,
   RECOMMENDED_IMAGE_HEIGHT,
   RECOMMENDED_IMAGE_WIDTH,
@@ -16,16 +18,31 @@ import {
 } from "./utils.js";
 import { VERSION } from "./version.js";
 
+const MAX_FETCH_BYTES = 20 * 1024 * 1024;
+
+export type ImageProbeResult = {
+  found: boolean;
+  contentType: string | null;
+  width: number | null;
+  height: number | null;
+  sizeBytes: number | null;
+  format: string | null;
+  decodeFailed?: boolean;
+  errorKind?: "fetch-failed" | "not-file" | "not-found" | "too-large-aborted";
+  errorDetail?: string;
+};
+
+export type ImageProbeCache = Map<string, Promise<ImageProbeResult>>;
+
 export type ValidateImageOptions = ResolveContext & {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
-  /** Label used in warning messages (default "og:image"). */
   label?: string;
-  /** Never fetch remote images; only local files / local path maps. */
   offline?: boolean;
+  cache?: ImageProbeCache;
 };
 
-/** Resolve an og:image / twitter:image reference, load it, and probe its dimensions. */
+/** Resolve an og:image / twitter:image reference, load it, and read its dimensions. */
 export async function validateImage(
   source: string,
   options: ValidateImageOptions = {},
@@ -37,38 +54,42 @@ export async function validateImage(
     warnings.push({
       severity: "warning",
       code: "og-image-relative",
-      message: `${label} is relative ("${source}"). Use an absolute URL for production.`,
+      message: `${label} is relative ("${source}"). Use an absolute https:// URL in production.`,
     });
   }
 
-  if (source.startsWith("http://")) {
+  if (isLocalhostUrl(source)) {
+    warnings.push({
+      severity: "warning",
+      code: "og-image-localhost",
+      message: `${label} points to localhost ("${source}").`,
+    });
+  } else if (source.startsWith("http://")) {
     warnings.push({
       severity: "warning",
       code: "og-image-insecure",
-      message: `${label} uses http:// ("${source}"). Use https:// to avoid mixed-content blocks on secure pages.`,
+      message: `${label} uses http:// ("${source}"). Use https:// to avoid mixed-content blocks.`,
     });
   }
 
   const { resolved, external } = resolveReference(source, options);
 
-  // Absolute production URL was mapped to a local file — good for local preflight.
   if (!external && isHttpUrl(source)) {
     warnings.push({
       severity: "info",
       code: "og-image-local-map",
-      message: `${label} URL maps to a local file (${resolved}). Validating on disk.`,
+      message: `${label} URL maps to local file ${resolved}.`,
     });
   }
 
-  // Folder audit: absolute URL did not map to a local file
   if (external && isHttpUrl(source) && options.baseDir && !options.offline) {
     const host = safeHost(source);
     warnings.push({
       severity: "info",
       code: "og-image-external-host",
       message: host
-        ? `${label} resolves to an external host (${host}) — this check hits that live URL, not a file in this folder. Use --offline to skip live fetches.`
-        : `${label} is an absolute remote URL — this check hits the live URL, not a file in this folder. Use --offline to skip live fetches.`,
+        ? `${label} points to external host ${host} (fetched live, not from this folder). Use --offline to skip remote fetches.`
+        : `${label} is a remote URL (fetched live, not from this folder). Use --offline to skip remote fetches.`,
     });
   }
 
@@ -87,11 +108,10 @@ export async function validateImage(
 
   if (isDataUrl(resolved)) {
     warnings.push({
-      severity: "info",
+      severity: "warning",
       code: "og-image-data-uri",
-      message: `${label} is a data URI. Skipping dimension validation.`,
+      message: `${label} is a data URI. Social crawlers require an http(s) image URL.`,
     });
-    audit.found = true;
     return audit;
   }
 
@@ -101,7 +121,7 @@ export async function validateImage(
       severity: "warning",
       code: "og-image-offline",
       message: host
-        ? `${label} points at ${host} with no matching file in this folder. Skipped live fetch (--offline).`
+        ? `${label} points to ${host} with no matching file in this folder. Skipped live fetch (--offline).`
         : `${label} is remote with no matching local file. Skipped live fetch (--offline).`,
     });
     if (options.searchRoot) {
@@ -112,28 +132,63 @@ export async function validateImage(
     return audit;
   }
 
-  const loaded = await loadImageBuffer(resolved, external, options, warnings, label);
-  if (!loaded) {
-    if (!external && source.startsWith("/") && options.searchRoot) {
-      const hint = await elsewhereWarning(label, source, options.searchRoot, options.baseDir);
-      if (hint) warnings.push(hint);
+  const probe = await probeWithCache(resolved, external, options);
+
+  if (!probe.found) {
+    if (probe.errorKind === "too-large-aborted") {
+      audit.found = true;
+      audit.sizeBytes = probe.sizeBytes;
+      audit.contentType = probe.contentType;
+      warnings.push({
+        severity: "warning",
+        code: "og-image-too-large",
+        message: `${label} exceeds ${formatBytes(MAX_FETCH_BYTES)} (recommended max: 5 MB). Download skipped.`,
+      });
+      return audit;
+    }
+
+    if (probe.errorKind === "fetch-failed") {
+      const host = safeHost(resolved);
+      warnings.push({
+        severity: "error",
+        code: "og-image-not-found",
+        message: host
+          ? `${label} could not be fetched from ${host} (${probe.errorDetail}). If this site is not deployed yet, use --offline or --no-images.`
+          : `${label} could not be fetched (${probe.errorDetail}).`,
+      });
+    } else if (probe.errorKind === "not-file") {
+      warnings.push({
+        severity: "error",
+        code: "og-image-not-found",
+        message: `${label} is not a file: ${resolved}`,
+      });
+    } else {
+      warnings.push({
+        severity: "error",
+        code: "og-image-not-found",
+        message: `${label} not found at ${resolved}.`,
+      });
+      if (!external && source.startsWith("/") && options.searchRoot) {
+        const hint = await elsewhereWarning(
+          label,
+          stripQueryAndHash(source),
+          options.searchRoot,
+          options.baseDir,
+        );
+        if (hint) warnings.push(hint);
+      }
     }
     return audit;
   }
 
   audit.found = true;
-  audit.sizeBytes = loaded.buffer.length;
-  audit.contentType = loaded.contentType;
+  audit.sizeBytes = probe.sizeBytes;
+  audit.contentType = probe.contentType;
+  audit.width = probe.width;
+  audit.height = probe.height;
+  audit.format = probe.format;
 
-  try {
-    const meta = imageSize(loaded.buffer);
-    audit.width = meta.width ?? null;
-    audit.height = meta.height ?? null;
-    audit.format = meta.type ?? null;
-    if (meta.type && !audit.contentType) {
-      audit.contentType = `image/${meta.type === "jpg" ? "jpeg" : meta.type}`;
-    }
-  } catch {
+  if (probe.decodeFailed) {
     warnings.push({
       severity: "error",
       code: "og-image-unreadable",
@@ -146,6 +201,14 @@ export async function validateImage(
       severity: "error",
       code: "og-image-bad-content-type",
       message: `${label} content type is "${audit.contentType}", expected image/*.`,
+    });
+  }
+
+  if (audit.format === "svg" || audit.contentType === "image/svg+xml") {
+    warnings.push({
+      severity: "warning",
+      code: "og-image-svg",
+      message: `${label} is an SVG. Most social platforms require PNG, JPEG, or WebP.`,
     });
   }
 
@@ -172,12 +235,70 @@ export async function validateImage(
   return audit;
 }
 
-/**
- * When a reference doesn't resolve where expected, check whether a file with the same
- * relative path exists elsewhere under the originally-scanned folder — usually a sign
- * shipcard was pointed at the wrong build output folder rather than a genuinely broken
- * image. `relativePath` may be root-relative ("/img/og.png") or a bare pathname.
- */
+function probeWithCache(
+  resolved: string,
+  external: boolean,
+  options: ValidateImageOptions,
+): Promise<ImageProbeResult> {
+  const key = `${external ? "ext" : "local"}:${resolved}`;
+  const cached = options.cache?.get(key);
+  if (cached) return cached;
+
+  const promise = probeImage(resolved, external, options);
+  options.cache?.set(key, promise);
+  return promise;
+}
+
+async function probeImage(
+  resolved: string,
+  external: boolean,
+  options: ValidateImageOptions,
+): Promise<ImageProbeResult> {
+  const loaded = await loadImageBuffer(resolved, external, options);
+  if ("errorKind" in loaded) {
+    return {
+      found: false,
+      contentType: loaded.contentType ?? null,
+      width: null,
+      height: null,
+      sizeBytes: loaded.sizeBytes ?? null,
+      format: null,
+      errorKind: loaded.errorKind,
+      errorDetail: loaded.errorDetail,
+    };
+  }
+
+  let width: number | null = null;
+  let height: number | null = null;
+  let format: string | null = null;
+  let contentType = loaded.contentType;
+  let decodeFailed = false;
+
+  try {
+    const meta = imageSize(loaded.buffer);
+    width = meta.width ?? null;
+    height = meta.height ?? null;
+    format = meta.type ?? null;
+    if (meta.type && !contentType) {
+      if (meta.type === "jpg") contentType = "image/jpeg";
+      else if (meta.type === "svg") contentType = "image/svg+xml";
+      else contentType = `image/${meta.type}`;
+    }
+  } catch {
+    decodeFailed = true;
+  }
+
+  return {
+    found: true,
+    contentType,
+    width,
+    height,
+    sizeBytes: loaded.buffer.length,
+    format,
+    decodeFailed,
+  };
+}
+
 async function elsewhereWarning(
   label: string,
   relativePath: string,
@@ -192,7 +313,7 @@ async function elsewhereWarning(
   return {
     severity: "warning",
     code: "og-image-found-elsewhere",
-    message: `${label} has no matching file at that path here, but a file exists at ${display}. This folder may not be your site's real root (e.g. a split client/server build) — try pointing shipcard at that subfolder.`,
+    message: `${label} was not found here, but exists at ${display}. Try pointing shipcard at that subfolder.`,
   };
 }
 
@@ -212,55 +333,41 @@ function safeHost(url: string): string | null {
   }
 }
 
+type LoadResult =
+  | { buffer: Buffer; contentType: string | null }
+  | {
+      errorKind: "fetch-failed" | "not-file" | "not-found" | "too-large-aborted";
+      errorDetail?: string;
+      sizeBytes?: number | null;
+      contentType?: string | null;
+    };
+
 async function loadImageBuffer(
   resolved: string,
   external: boolean,
   options: ValidateImageOptions,
-  warnings: Warning[],
-  label: string,
-): Promise<{ buffer: Buffer; contentType: string | null } | null> {
+): Promise<LoadResult> {
   if (external && isHttpUrl(resolved)) {
     try {
       return await fetchImageBuffer(resolved, options);
     } catch (err) {
-      const host = safeHost(resolved);
-      const detail = (err as Error).message;
-      warnings.push({
-        severity: "error",
-        code: "og-image-not-found",
-        message: host
-          ? `${label} could not be fetched from ${host} (${detail}). If this site is not deployed yet, use --offline or --no-images.`
-          : `${label} could not be fetched (${detail}).`,
-      });
-      return null;
+      return { errorKind: "fetch-failed", errorDetail: (err as Error).message };
     }
   }
 
   try {
     const stat = await fs.stat(resolved);
-    if (!stat.isFile()) {
-      warnings.push({
-        severity: "error",
-        code: "og-image-not-found",
-        message: `${label} is not a file: ${resolved}`,
-      });
-      return null;
-    }
+    if (!stat.isFile()) return { errorKind: "not-file" };
     return { buffer: await fs.readFile(resolved), contentType: null };
   } catch {
-    warnings.push({
-      severity: "error",
-      code: "og-image-not-found",
-      message: `${label} not found at ${resolved}.`,
-    });
-    return null;
+    return { errorKind: "not-found" };
   }
 }
 
 async function fetchImageBuffer(
   url: string,
   options: ValidateImageOptions,
-): Promise<{ buffer: Buffer; contentType: string | null }> {
+): Promise<LoadResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
@@ -272,7 +379,35 @@ async function fetchImageBuffer(
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() || null;
-    return { buffer: Buffer.from(await response.arrayBuffer()), contentType };
+
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_FETCH_BYTES) {
+      controller.abort();
+      return { errorKind: "too-large-aborted", sizeBytes: declaredLength, contentType };
+    }
+
+    if (response.body && typeof response.body.getReader === "function") {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_FETCH_BYTES) {
+          controller.abort();
+          return { errorKind: "too-large-aborted", sizeBytes: total, contentType };
+        }
+        chunks.push(value);
+      }
+      return { buffer: Buffer.concat(chunks), contentType };
+    }
+
+    const buf = Buffer.from(await response.arrayBuffer());
+    if (buf.length > MAX_FETCH_BYTES) {
+      return { errorKind: "too-large-aborted", sizeBytes: buf.length, contentType };
+    }
+    return { buffer: buf, contentType };
   } finally {
     clearTimeout(timer);
   }

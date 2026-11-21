@@ -4,15 +4,17 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import pc from "picocolors";
-import { audit } from "./index.js";
-import { planFromReport } from "./plan.js";
-import { NoHtmlFilesError } from "./audit-folder.js";
-import { renderTerminal } from "./render-terminal.js";
-import { renderPreviewHtml } from "./preview-html.js";
-import { VERSION } from "./version.js";
-import type { AuditReport } from "./types.js";
+import {
+  audit,
+  NoHtmlFilesError,
+  renderPreviewHtml,
+  renderTerminal,
+  version as VERSION,
+  type AuditReport,
+} from "./index.js";
 
 const DEFAULT_PREVIEW_PATH = "shipcard-preview.html";
+const VALUE_FLAGS = new Set(["--fail-below", "--timeout", "--output"]);
 
 type CliOptions = {
   json: boolean;
@@ -28,40 +30,58 @@ type CliOptions = {
 
 const HELP = `shipcard ${VERSION}
 
-Catch broken social cards before you ship.
+Check Open Graph, Twitter, and social link preview tags before you ship.
 
 Usage:
   shipcard <target> [options]
 
-  target  URL, folder, .html file, or - for stdin
+  target  URL, build folder, .html file, or - for stdin
 
 Options:
-  --json                 print JSON (includes plan.actions for agents)
+  --json                 print JSON report
   --fail-below <n>       exit 1 if score < n (0-100)
-  --timeout <ms>         network timeout
-  --no-images            skip image validation entirely
-  --offline              don't fetch remote images (local files / path maps only)
-  --preview [file]       write HTML card mockups (default: ${DEFAULT_PREVIEW_PATH})
-  --embed                with --preview, inline local images as data: URIs
+  --timeout <ms>         network timeout in milliseconds
+  --no-images            skip image validation
+  --offline              check local files only; never fetch remote images
+  --preview [file]       write HTML card previews (default: ${DEFAULT_PREVIEW_PATH})
+  --embed                with --preview, inline local images as data URIs
   --output <file>        write the report to a file
-  --watch                re-run when the target changes
+  --watch                re-run when local target files change
   -h, --help             show help
   -V, --version          show version
 
-Pre-launch tip:
-  Absolute og:image URLs to a site that isn't deployed yet will 404 on live fetch.
-  Prefer:  shipcard ./dist --offline
-  Or skip images:  shipcard ./dist --no-images --fail-below 80
+Examples:
+  shipcard ./dist --offline
+  shipcard http://localhost:3000
+  shipcard ./dist --preview cards.html --embed
 `;
 
-function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help" | "version" {
-  // parseArgs requires a value for string options; bare --preview → default path
+function normalizePreviewArg(argv: string[]): string[] {
+  // Determine whether a positional target already exists outside --preview so
+  // `shipcard --preview ./dist` keeps `./dist` as the target instead of the preview path.
+  const positionalsOutsidePreview: number[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      for (let j = i + 1; j < argv.length; j++) positionalsOutsidePreview.push(j);
+      break;
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
+    if (arg === "--preview" || arg.startsWith("--preview=")) continue;
+    if (arg === "-" || !arg.startsWith("-")) positionalsOutsidePreview.push(i);
+  }
+
   const normalized: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--preview") {
       const next = argv[i + 1];
-      if (!next || next.startsWith("-")) {
+      const nextIsFlag = !next || (next.startsWith("-") && next !== "-");
+      const otherPositionals = positionalsOutsidePreview.filter((idx) => idx !== i + 1);
+      if (nextIsFlag || next === "-" || otherPositionals.length === 0) {
         normalized.push("--preview", DEFAULT_PREVIEW_PATH);
       } else {
         normalized.push("--preview", next);
@@ -71,33 +91,30 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
     }
     normalized.push(arg);
   }
+  return normalized;
+}
 
-  let values: Record<string, unknown>;
-  let positionals: string[];
-  try {
-    const parsed = parseArgs({
-      args: normalized,
-      allowPositionals: true,
-      strict: true,
-      options: {
-        json: { type: "boolean", default: false },
-        "fail-below": { type: "string" },
-        timeout: { type: "string" },
-        "no-images": { type: "boolean", default: false },
-        offline: { type: "boolean", default: false },
-        preview: { type: "string" },
-        output: { type: "string" },
-        watch: { type: "boolean", default: false },
-        embed: { type: "boolean", default: false },
-        help: { type: "boolean", short: "h", default: false },
-        version: { type: "boolean", short: "V", default: false },
-      },
-    });
-    values = parsed.values;
-    positionals = parsed.positionals;
-  } catch (err) {
-    throw new Error(err instanceof Error ? err.message : String(err));
-  }
+function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help" | "version" {
+  const normalized = normalizePreviewArg(argv);
+
+  const { values, positionals } = parseArgs({
+    args: normalized,
+    allowPositionals: true,
+    strict: true,
+    options: {
+      json: { type: "boolean", default: false },
+      "fail-below": { type: "string" },
+      timeout: { type: "string" },
+      "no-images": { type: "boolean", default: false },
+      offline: { type: "boolean", default: false },
+      preview: { type: "string" },
+      output: { type: "string" },
+      watch: { type: "boolean", default: false },
+      embed: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+      version: { type: "boolean", short: "V", default: false },
+    },
+  });
 
   if (values.help) return "help";
   if (values.version) return "version";
@@ -129,7 +146,13 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
 async function runOnce(target: string, opts: CliOptions): Promise<{ code: number; report?: AuditReport }> {
   const failBelow = parseFailBelow(opts.failBelow);
   if (failBelow instanceof Error) {
-    emitError(opts, "bad-flag", failBelow.message);
+    emitError(opts.json, "bad-flag", failBelow.message);
+    return { code: 1 };
+  }
+
+  const timeoutMs = parseTimeout(opts.timeout);
+  if (timeoutMs instanceof Error) {
+    emitError(opts.json, "bad-flag", timeoutMs.message);
     return { code: 1 };
   }
 
@@ -137,17 +160,17 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
   try {
     report = await audit(target, {
       version: VERSION,
-      timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+      timeoutMs: timeoutMs ?? undefined,
       validateImages: opts.images,
       offline: opts.offline,
     });
   } catch (err) {
     if (err instanceof NoHtmlFilesError) {
       emitError(
-        opts,
+        opts.json,
         "no-html-files",
         err.message,
-        "Point shipcard at a built site folder. Common targets: ./dist, ./out, ./build, ./public.",
+        "Pass a built site folder such as ./dist, ./out, ./build, or ./public.",
       );
       return { code: 1 };
     }
@@ -157,30 +180,21 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
       code === "target-not-found"
         ? "Pass a URL, a folder (./dist), a .html file, or - for stdin."
         : undefined;
-    emitError(opts, code, msg, hint);
+    emitError(opts.json, code, msg, hint);
     return { code: 1 };
   }
 
-  // Always attach plan for machine consumers; agents use plan.actions as the todo list.
-  const plan = planFromReport(report);
-  const reportWithPlan: AuditReport = { ...report, plan };
-
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(reportWithPlan, null, 2) + "\n");
-  } else {
-    process.stdout.write(renderTerminal(reportWithPlan));
-  }
+  const jsonOutput = opts.json ? JSON.stringify(report, null, 2) + "\n" : null;
+  process.stdout.write(jsonOutput ?? renderTerminal(report));
 
   if (opts.output) {
     try {
-      const content = opts.json
-        ? JSON.stringify(reportWithPlan, null, 2) + "\n"
-        : renderTerminal(reportWithPlan);
+      const content = jsonOutput ?? renderTerminal(report, { color: false });
       await fsp.writeFile(path.resolve(opts.output), content, "utf8");
       if (!opts.json) process.stdout.write(pc.dim(`\nReport written to ${opts.output}\n`));
     } catch (err) {
       emitError(
-        opts,
+        opts.json,
         "write-failed",
         `Could not write --output: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -192,13 +206,13 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
     try {
       await fsp.writeFile(
         path.resolve(opts.preview),
-        renderPreviewHtml(reportWithPlan, { embedLocalImages: opts.embed }),
+        renderPreviewHtml(report, { embedLocalImages: opts.embed }),
         "utf8",
       );
       if (!opts.json) process.stdout.write(pc.dim(`\nPreview written to ${opts.preview}\n`));
     } catch (err) {
       emitError(
-        opts,
+        opts.json,
         "write-failed",
         `Could not write preview: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -206,26 +220,33 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
     }
   }
 
-  if (failBelow !== null && reportWithPlan.summary.score < failBelow) {
+  if (failBelow !== null && report.summary.score < failBelow) {
     if (!opts.json) {
       process.stdout.write(
-        pc.red(
-          `\nShip blocked: score ${reportWithPlan.summary.score} is below threshold ${failBelow}.\n`,
-        ),
+        pc.red(`\nFailed: score ${report.summary.score} is below --fail-below ${failBelow}.\n`),
       );
     }
-    return { code: 1, report: reportWithPlan };
+    return { code: 1, report };
   }
 
-  return { code: 0, report: reportWithPlan };
+  return { code: 0, report };
 }
 
 async function run(target: string, opts: CliOptions): Promise<number> {
+  if (opts.watch && (target === "-" || /^https?:\/\//i.test(target))) {
+    emitError(opts.json, "bad-flag", "--watch only supports local folders or .html files.");
+    return 1;
+  }
+
   const result = await runOnce(target, opts);
   if (!opts.watch) return result.code;
 
-  const toWatch = target === "-" ? process.cwd() : target;
-  process.stderr.write(pc.dim(`[watch] Watching ${toWatch} for changes (Ctrl-C to stop)\n`));
+  const watchRoot = path.resolve(target);
+  const ignoredOutputs = new Set(
+    [opts.preview, opts.output].filter((p): p is string => !!p).map((p) => path.resolve(p)),
+  );
+
+  process.stderr.write(pc.dim(`[watch] Watching ${target} (Ctrl-C to stop)\n`));
 
   let timer: NodeJS.Timeout | null = null;
   let running = false;
@@ -239,7 +260,7 @@ async function run(target: string, opts: CliOptions): Promise<number> {
         return;
       }
       running = true;
-      process.stderr.write(pc.dim(`[watch] change — re-running audit...\n`));
+      process.stderr.write(pc.dim("[watch] Re-running audit...\n"));
       try {
         await runOnce(target, opts);
       } finally {
@@ -253,45 +274,69 @@ async function run(target: string, opts: CliOptions): Promise<number> {
   };
 
   const onChange = (_event: string, filename: string | null) => {
-    if (filename && String(filename).includes("node_modules")) return;
+    if (filename) {
+      const text = String(filename);
+      if (text.includes("node_modules")) return;
+      const changedAbs = path.resolve(watchRoot, text);
+      if (ignoredOutputs.has(changedAbs)) return;
+    }
     kick();
   };
 
+  let watcher: fs.FSWatcher;
   try {
-    // recursive is solid on macOS/Windows; Linux support varies by Node version
-    let watcher: fs.FSWatcher;
     try {
-      watcher = fs.watch(toWatch, { recursive: true }, onChange);
+      watcher = fs.watch(watchRoot, { recursive: true }, onChange);
     } catch {
-      watcher = fs.watch(toWatch, onChange);
-      process.stderr.write(pc.dim("[watch] recursive unavailable — watching top level only\n"));
+      watcher = fs.watch(watchRoot, onChange);
+      process.stderr.write(pc.dim("[watch] Recursive watch unavailable; watching top level only\n"));
     }
     watcher.on("error", (err) => {
       process.stderr.write(pc.red(`[watch] ${err.message}\n`));
     });
   } catch (err) {
-    process.stderr.write(
-      pc.red(`shipcard: could not watch ${toWatch}: ${err instanceof Error ? err.message : String(err)}\n`),
+    emitError(
+      opts.json,
+      "watch-failed",
+      `Could not watch ${target}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return 1;
   }
 
-  await new Promise(() => {});
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      if (timer) clearTimeout(timer);
+      watcher.close();
+      resolve();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+
   return 0;
 }
 
 function parseFailBelow(value: string | undefined): number | null | Error {
   if (value === undefined) return null;
   const n = Number(value);
-  if (Number.isNaN(n) || n < 0 || n > 100) {
+  if (!Number.isFinite(n) || n < 0 || n > 100) {
     return new Error(`--fail-below must be a number between 0 and 100, got "${value}".`);
   }
   return n;
 }
 
-function emitError(opts: CliOptions, code: string, message: string, hint?: string): void {
-  if (opts.json) {
-    const body: Record<string, unknown> = {
+function parseTimeout(value: string | undefined): number | null | Error {
+  if (value === undefined) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    return new Error(`--timeout must be a positive number in ms, got "${value}".`);
+  }
+  return n;
+}
+
+function emitError(json: boolean, code: string, message: string, hint?: string): void {
+  if (json) {
+    const body = {
       tool: "shipcard",
       version: VERSION,
       error: hint ? { code, message, hint } : { code, message },
@@ -304,12 +349,15 @@ function emitError(opts: CliOptions, code: string, message: string, hint?: strin
 }
 
 async function main(): Promise<void> {
+  const rawArgs = process.argv.slice(2);
+  const wantsJson = rawArgs.includes("--json");
+
   let parsed: ReturnType<typeof parseCli>;
   try {
-    parsed = parseCli(process.argv.slice(2));
+    parsed = parseCli(rawArgs);
   } catch (err) {
-    process.stderr.write(pc.red(`shipcard: ${err instanceof Error ? err.message : String(err)}\n`));
-    process.stderr.write(pc.dim("Try shipcard --help\n"));
+    const msg = err instanceof Error ? err.message : String(err);
+    emitError(wantsJson, "bad-args", msg, "Run shipcard --help for usage.");
     process.exit(1);
   }
 
@@ -326,6 +374,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(pc.red(`shipcard: ${err instanceof Error ? err.message : String(err)}\n`));
+  const wantsJson = process.argv.includes("--json");
+  emitError(wantsJson, "unexpected", err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

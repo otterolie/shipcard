@@ -3,9 +3,8 @@ import type { SocialMeta } from "./types.js";
 import { firstNonEmpty } from "./utils.js";
 
 /**
- * Parse social/SEO metadata from an HTML document.
- * Scans the whole document (not only <head>) so misnested tags still get caught.
- * OG/Twitter keys accepted on either `property` or `name`.
+ * Parse social and SEO metadata from an HTML document.
+ * Scans the entire document so misnested tags outside <head> are still found.
  */
 export function extractMeta(html: string): SocialMeta {
   const $ = cheerio.load(html);
@@ -13,6 +12,7 @@ export function extractMeta(html: string): SocialMeta {
   const openGraph: Record<string, string[]> = {};
   const twitter: Record<string, string[]> = {};
   const links: Record<string, string[]> = {};
+  let metaDescription: string | null = null;
 
   $("meta").each((_, el) => {
     const $el = $(el);
@@ -22,7 +22,9 @@ export function extractMeta(html: string): SocialMeta {
     const value = content.trim();
     if (!value) return;
 
-    if (key.startsWith("og:")) {
+    if (key === "description" && metaDescription === null) {
+      metaDescription = value;
+    } else if (key.startsWith("og:")) {
       (openGraph[key.slice(3)] ||= []).push(value);
     } else if (key.startsWith("twitter:")) {
       (twitter[key.slice("twitter:".length)] ||= []).push(value);
@@ -31,20 +33,20 @@ export function extractMeta(html: string): SocialMeta {
 
   $("link").each((_, el) => {
     const $el = $(el);
-    const rel = ($el.attr("rel") || "").trim().toLowerCase();
+    const relAttr = ($el.attr("rel") || "").trim().toLowerCase();
     const href = $el.attr("href")?.trim();
-    if (!rel || !href) return;
-    (links[rel] ||= []).push(href);
+    if (!relAttr || !href) return;
+    for (const rel of relAttr.split(/\s+/)) {
+      if (rel) (links[rel] ||= []).push(href);
+    }
   });
 
   const titleTag = $("title").first().text().trim() || null;
-  const metaDescription =
-    $('meta[name="description"]').first().attr("content")?.trim() || null;
 
   return {
     title: firstNonEmpty(openGraph["title"]?.[0], titleTag),
     description: firstNonEmpty(openGraph["description"]?.[0], metaDescription),
-    image: firstNonEmpty(openGraph["image"]?.[0], twitter["image"]?.[0]),
+    image: firstNonEmpty(openGraph["image"]?.[0], openGraph["image:url"]?.[0], twitter["image"]?.[0]),
     url: openGraph["url"]?.[0] ?? null,
     type: openGraph["type"]?.[0] ?? null,
     siteName: openGraph["site_name"]?.[0] ?? null,

@@ -1,136 +1,133 @@
 import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   AuditReport,
   ImageAudit,
   PageReport,
+  PageStatus,
   PlatformField,
   PlatformPreview,
 } from "./types.js";
 import { fixBundle, fixesForPage, type Fix } from "./fixes.js";
+import { statusFromScore } from "./score.js";
+import { escapeHtml } from "./utils.js";
 
-/**
- * Render a self-contained HTML report with platform card mockups for every page.
- * Output is portable: open in any browser, no servers or external assets.
- *
- * Mockup styling approximates each platform's documented feed rendering. Real
- * platforms re-render constantly (viewport, locale, A/B tests, cache state), so
- * treat truncation indicators and "rendersAsLarge" as a guide, not a promise.
- */
-export function renderPreviewHtml(report: AuditReport, opts: { embedLocalImages?: boolean } = {}): string {
+const TARGET_TYPE_LABELS: Record<AuditReport["target"]["type"], string> = {
+  url: "URL",
+  folder: "Folder",
+  file: "File",
+  stdin: "Stdin",
+};
+
+const STATUS_LABELS: Record<PageStatus, string> = {
+  pass: "Pass",
+  warn: "Warn",
+  fail: "Fail",
+};
+
+/** Render a self-contained HTML preview report with platform mockups and fix snippets. */
+export function renderPreviewHtml(
+  report: AuditReport,
+  opts: { embedLocalImages?: boolean } = {},
+): string {
   const target = escapeHtml(report.target.input);
   const generated = escapeHtml(formatDate(new Date(report.createdAt)));
-  const targetType = report.target.type === "url" ? "URL" : "Folder";
+  const targetType = TARGET_TYPE_LABELS[report.target.type];
+  const overall = statusFromScore(report.summary.score);
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shipcard — ${target}</title>
+<title>shipcard: ${target}</title>
 <style>${STYLES}</style>
 </head>
 <body>
-<div class="doc">
-
-  <header class="masthead">
-    <div class="masthead-brand">
-      <div class="wordmark">SHIPCARD</div>
-      <div class="tagline">Social preview preflight</div>
+<div class="container">
+  <header class="header">
+    <div class="header-top">
+      <div>
+        <h1 class="title">shipcard</h1>
+        <p class="meta-line">
+          <span>${targetType}: <code>${target}</code></span>
+          <span>Pages: ${report.summary.pagesScanned}</span>
+          <span>Generated: ${generated}</span>
+          <span>v${escapeHtml(report.version)}</span>
+        </p>
+      </div>
+      <div class="summary">
+        <div class="score-badge status-${overall}">
+          <span class="score-value">${report.summary.score}</span><span class="score-max">/100</span>
+          <span class="status-pill">${STATUS_LABELS[overall]}</span>
+        </div>
+        <div class="tally">
+          <span><strong>${report.summary.passed}</strong> pass</span>
+          <span><strong>${report.summary.warnings}</strong> warn</span>
+          <span><strong>${report.summary.failed}</strong> fail</span>
+        </div>
+      </div>
     </div>
-    <dl class="manifest">
-      <div><dt>${targetType}</dt><dd>${target}</dd></div>
-      <div><dt>Generated</dt><dd>${generated}</dd></div>
-      <div><dt>Version</dt><dd>${escapeHtml(report.version)}</dd></div>
-      <div><dt>Pages</dt><dd>${report.summary.pagesScanned}</dd></div>
-    </dl>
-    ${renderSummary(report)}
   </header>
 
   <main>
 ${report.pages.map((p, i) => renderPage(p, i + 1, report, !!opts.embedLocalImages)).join("\n")}
   </main>
 
-  <footer class="colophon">
-    <div>
-      Card layouts approximate the feed rendering documented by each platform. Character limits, fallback chains, and image-size rules are based on each platform's developer docs but real rendering may vary by viewport, locale, and A/B tests.
-    </div>
-    <div class="colophon-mark">Shipcard ${escapeHtml(report.version)}</div>
+  <footer class="footer">
+    Previews approximate each platform's documented link-card rules. Actual feeds vary by viewport, locale, and cache state.
   </footer>
-
 </div>
 </body>
 </html>`;
 }
 
-function renderSummary(report: AuditReport): string {
-  const { summary } = report;
-  const status = summary.score >= 90 ? "ready" : summary.score >= 70 ? "warning" : "fail";
-  const statusLabel =
-    status === "ready" ? "Ready to ship" : status === "warning" ? "Minor leaks" : "Ship blocked";
-  return `<div class="summary">
-    <div class="summary-score">
-      <div class="score-num">${summary.score}</div>
-      <div class="score-denom">/ 100</div>
-    </div>
-    <div class="summary-status status-${status}">${escapeHtml(statusLabel)}</div>
-    <div class="summary-tally">
-      <span><strong>${summary.ready}</strong> ready</span>
-      <span class="sep">·</span>
-      <span><strong>${summary.warnings}</strong> warning</span>
-      <span class="sep">·</span>
-      <span><strong>${summary.failed}</strong> failed</span>
-    </div>
-  </div>`;
-}
-
-function renderPage(page: PageReport, index: number, report: AuditReport, embed = false): string {
+function renderPage(page: PageReport, index: number, report: AuditReport, embed: boolean): string {
   const hostname = hostnameFor(page);
-  const num = String(index).padStart(2, "0");
   return `    <section class="page">
       <div class="page-head">
-        <div class="page-num">${num}</div>
+        <span class="page-index">${String(index).padStart(2, "0")}</span>
         <h2 class="page-path">${escapeHtml(page.path)}</h2>
-        <div class="page-score status-${page.status}">
-          <span class="page-score-num">${page.score}</span>
-          <span class="page-score-denom">/100</span>
-          <span class="page-status-pill">${escapeHtml(pageStatusLabel(page.status))}</span>
-        </div>
+        <span class="page-score status-${page.status}">
+          ${page.score}/100 · ${STATUS_LABELS[page.status]}
+        </span>
       </div>
-      <div class="page-cards">
-${page.platforms.map((p) => renderPlatformBlock(p, page, hostname, embed)).join("\n")}
+      <div class="cards-grid">
+${page.platforms.map((p) => renderPlatformCard(p, page, hostname, embed)).join("\n")}
       </div>
       ${renderFixesSection(page, report)}
     </section>`;
 }
 
-function renderPlatformBlock(
+function renderPlatformCard(
   preview: PlatformPreview,
   page: PageReport,
   hostname: string,
-  embed = false,
+  embed: boolean,
 ): string {
-  return `        <article class="block block-${preview.platform}">
-          <header class="block-head">
-            <div class="block-platform">${escapeHtml(preview.label)}</div>
-            <div class="block-layout">${escapeHtml(layoutLabel(preview.cardLayout))}</div>
+  const audit = auditForPlatform(preview, page);
+  return `        <article class="card">
+          <header class="card-head">
+            <span class="card-platform">${escapeHtml(preview.label)}</span>
+            <span class="card-layout">${escapeHtml(layoutLabel(preview.cardLayout))}</span>
           </header>
-          <div class="block-stage">
-            ${renderMockup(preview, page, hostname, embed)}
+          <div class="card-stage">
+            ${renderMockup(preview, audit, hostname, embed)}
           </div>
-          ${renderLedger(preview, page)}
+          ${renderDetails(preview, audit)}
           ${renderIssues(preview)}
         </article>`;
 }
 
-function pageStatusLabel(status: PageReport["status"]): string {
-  if (status === "ready") return "Ready to ship";
-  if (status === "warning") return "Minor leaks";
-  return "Ship blocked";
+function auditForPlatform(preview: PlatformPreview, page: PageReport): ImageAudit | null {
+  if (!preview.image.url) return null;
+  if (page.images && page.images.length > 0) {
+    const exact = page.images.find((i) => i.source === preview.image.url);
+    if (exact) return exact;
+  }
+  return page.image;
 }
-
-// -----------------------------------------------------------------------------
-// Fix-it section
-// -----------------------------------------------------------------------------
 
 function renderFixesSection(page: PageReport, report: AuditReport): string {
   const fixes = fixesForPage(page, report);
@@ -141,221 +138,154 @@ function renderFixesSection(page: PageReport, report: AuditReport): string {
   const bundle = fixBundle(fixes);
 
   return `<div class="fixes">
-        <header class="fixes-head">
-          <h3 class="fixes-title">Get <code>${escapeHtml(page.path)}</code> to ship</h3>
-          <div class="fixes-delta">
-            <span class="fixes-from">${page.score}</span>
-            <span class="fixes-arrow">→</span>
-            <span class="fixes-to">${target}</span>
-            ${scorePoints > 0 ? `<span class="fixes-points">+${scorePoints} points</span>` : ""}
-          </div>
-        </header>
+        <div class="fixes-head">
+          <h3>Fixes for <code>${escapeHtml(page.path)}</code></h3>
+          <span class="fixes-delta">${page.score} → ${target}${scorePoints > 0 ? ` (+${scorePoints})` : ""}</span>
+        </div>
         <ol class="fix-list">
-${fixes.map((f, i) => renderFixCard(f, i + 1)).join("\n")}
+${fixes.map((f, i) => renderFixItem(f, i + 1)).join("\n")}
         </ol>
         ${
           bundle
             ? `<details class="fix-bundle">
-          <summary>All snippets as one block</summary>
-          <pre class="fix-bundle-code"><code>&lt;!-- Add to &lt;head&gt; --&gt;
-${escapeHtml(bundle)}</code></pre>
+          <summary>Copy all snippets</summary>
+          <pre class="code-block"><code>${escapeHtml(bundle)}</code></pre>
         </details>`
             : ""
         }
       </div>`;
 }
 
-function renderFixCard(fix: Fix, index: number): string {
-  const weightLabel = fix.weight > 0 ? `+${fix.weight}` : "·";
-  return `          <li class="fix">
-            <div class="fix-rail">
-              <span class="fix-rail-num">${String(index).padStart(2, "0")}</span>
-              <span class="fix-rail-weight">${weightLabel}</span>
+function renderFixItem(fix: Fix, index: number): string {
+  const weight = fix.weight > 0 ? `+${fix.weight}` : "·";
+  return `          <li class="fix-item">
+            <div class="fix-meta">
+              <span class="fix-num">${String(index).padStart(2, "0")}</span>
+              <span class="fix-weight">${weight}</span>
             </div>
             <div class="fix-body">
-              <h4 class="fix-label">${escapeHtml(fix.label)}</h4>
+              <div class="fix-label">${escapeHtml(fix.label)}</div>
               <p class="fix-explain">${escapeHtml(fix.explain)}</p>
-              ${
-                fix.snippet
-                  ? `<pre class="fix-snippet"><code>${escapeHtml(fix.snippet)}</code></pre>`
-                  : ""
-              }
+              ${fix.snippet ? `<pre class="code-block"><code>${escapeHtml(fix.snippet)}</code></pre>` : ""}
             </div>
           </li>`;
 }
 
 function layoutLabel(layout: PlatformPreview["cardLayout"]): string {
-  if (layout === "large") return "Large image card";
-  if (layout === "summary") return "Summary card";
-  if (layout === "inline") return "Inline preview";
-  return "No card — text only";
+  if (layout === "large") return "Large image";
+  if (layout === "summary") return "Summary";
+  if (layout === "inline") return "Inline";
+  return "Text only";
 }
-
-// -----------------------------------------------------------------------------
-// Per-platform card mockups
-// -----------------------------------------------------------------------------
 
 function renderMockup(
   preview: PlatformPreview,
-  page: PageReport,
+  audit: ImageAudit | null,
   hostname: string,
-  embed = false,
+  embed: boolean,
 ): string {
-  if (preview.cardLayout === "none") return renderEmptyMockup(preview, hostname);
+  if (preview.cardLayout === "none") {
+    return `<div class="mockup mockup-none">
+      <div class="mockup-host">${escapeHtml(hostname)}</div>
+      <div class="mockup-empty">${escapeHtml(preview.label)} will not render a rich preview.</div>
+    </div>`;
+  }
 
-  const imgSrc = imageSrcFor(preview, page.image, embed);
+  const imgSrc = imageSrcFor(preview, audit, embed);
   const title = preview.title.value;
   const desc = preview.description.value;
+  const isTall = preview.platform === "pinterest";
+  const isSquare = preview.platform === "imessage" || preview.cardLayout === "summary";
+  const imgRatio = isTall ? "ratio-tall" : isSquare ? "ratio-square" : "ratio-wide";
 
-  // Use a single, consistent, simple preview renderer for all platforms.
-  // This keeps the report clear, scannable, and not over-designed.
-  // Platform differentiation comes from the label + layout tag (above) and any warnings (below).
-  return renderSimplePreview(imgSrc, title, desc, hostname, preview.platform, preview.cardLayout);
-}
+  const layoutClass =
+    preview.cardLayout === "summary"
+      ? "mockup-summary"
+      : preview.cardLayout === "inline"
+        ? "mockup-inline"
+        : "mockup-large";
 
-function renderSimplePreview(
-  img: string | null,
-  title: string | null,
-  desc: string | null,
-  host: string,
-  platform: string,
-  _layout: string,
-): string {
-  const isTall = platform === "pinterest";
-  const isSquare = platform === "imessage";
-  const imgClass = isTall
-    ? "preview-img-tall"
-    : isSquare
-      ? "preview-img-square"
-      : "preview-img-standard";
-
-  const imgHtml = img
-    ? `<div class="preview-img ${imgClass}">${imgEl(img)}</div>`
+  const imgHtml = imgSrc
+    ? `<div class="mockup-img ${imgRatio}"><img src="${escapeHtml(imgSrc)}" alt="" loading="lazy"></div>`
     : "";
 
-  return `
-    <div class="preview">
-      ${imgHtml}
-      <div class="preview-body">
-        <div class="preview-host">${escapeHtml(host)}</div>
-        <div class="preview-title">${renderField(title)}</div>
-        ${desc ? `<div class="preview-desc">${escapeHtml(desc)}</div>` : ""}
-      </div>
+  return `<div class="mockup ${layoutClass}">
+    ${imgHtml}
+    <div class="mockup-body">
+      <div class="mockup-host">${escapeHtml(hostname)}</div>
+      <div class="mockup-title">${title ? escapeHtml(title) : '<span class="muted">No title</span>'}</div>
+      ${desc ? `<div class="mockup-desc">${escapeHtml(desc)}</div>` : ""}
     </div>
-  `;
-}
-
-function renderEmptyMockup(preview: PlatformPreview, hostname: string): string {
-  return `<div class="preview preview-none">
-    <div class="preview-none-host">${escapeHtml(hostname)}</div>
-    <div class="preview-none-note">${escapeHtml(preview.label)} will not render a rich preview for this page.</div>
   </div>`;
 }
 
-// -----------------------------------------------------------------------------
-// Ledger — the per-card data block. This is the "smart" part of the report.
-// -----------------------------------------------------------------------------
-
-function renderLedger(preview: PlatformPreview, page: PageReport): string {
-  const rows: string[] = [];
-
-  rows.push(fieldRow("Title", preview.title));
+function renderDetails(preview: PlatformPreview, audit: ImageAudit | null): string {
+  const rows: string[] = [fieldRow("Title", preview.title)];
   if (preview.description.charLimit !== null) {
     rows.push(fieldRow("Description", preview.description));
   }
-
-  // Image row
-  const imgRow = imageRow(preview, page.image);
+  const imgRow = imageRow(preview, audit);
   if (imgRow) rows.push(imgRow);
-
-  return `<dl class="ledger">${rows.join("")}</dl>`;
+  return `<dl class="details">${rows.join("")}</dl>`;
 }
 
 function fieldRow(label: string, field: PlatformField): string {
   const source = field.source ?? "—";
-  const valueLen = field.value?.length ?? 0;
-  const limit = field.charLimit;
-  const limitText = limit ? `${valueLen}/${limit}` : `${valueLen}`;
-  const truncBadge = field.truncated
-    ? `<span class="badge badge-truncated">Truncated</span>`
-    : "";
-  const missingBadge = !field.value
-    ? `<span class="badge badge-missing">Missing</span>`
-    : "";
+  const len = field.value?.length ?? 0;
+  const count = field.charLimit ? `${len}/${field.charLimit}` : `${len}`;
+  const badge = !field.value
+    ? '<span class="badge badge-fail">Missing</span>'
+    : field.truncated
+      ? '<span class="badge badge-warn">Truncated</span>'
+      : "";
 
-  return `<div class="ledger-row">
+  return `<div class="detail-row">
     <dt>${label}</dt>
-    <dd>
-      <span class="ledger-source">from <code>${escapeHtml(source)}</code></span>
-      <span class="ledger-count">${limitText} chars</span>
-      ${truncBadge}${missingBadge}
-    </dd>
+    <dd><code>${escapeHtml(source)}</code> <span class="muted">${count} chars</span> ${badge}</dd>
   </div>`;
 }
 
-function imageRow(preview: PlatformPreview, image: ImageAudit | null): string {
-  if (!preview.image.url && !image) return "";
+function imageRow(preview: PlatformPreview, audit: ImageAudit | null): string {
+  if (!preview.image.url && !audit) return "";
   const source = preview.image.source ?? "—";
-  const dims =
-    image && image.width && image.height ? `${image.width}×${image.height}` : "unknown";
-  const layoutNote = preview.image.rendersAsLarge
-    ? `<span class="badge badge-ok">Large layout</span>`
-    : preview.image.url
-      ? `<span class="badge badge-warn">Small layout</span>`
-      : `<span class="badge badge-missing">No image</span>`;
-  return `<div class="ledger-row">
+  const dims = audit && audit.width && audit.height ? `${audit.width}x${audit.height}` : "unknown";
+  const badge = preview.image.rendersAsLarge
+    ? '<span class="badge badge-pass">Large</span>'
+    : preview.image.url && preview.image.meetsMinimum
+      ? '<span class="badge badge-warn">Small</span>'
+      : '<span class="badge badge-fail">Unavailable</span>';
+
+  return `<div class="detail-row">
     <dt>Image</dt>
-    <dd>
-      <span class="ledger-source">from <code>${escapeHtml(source)}</code></span>
-      <span class="ledger-count">${escapeHtml(dims)}</span>
-      ${layoutNote}
-    </dd>
+    <dd><code>${escapeHtml(source)}</code> <span class="muted">${escapeHtml(dims)}</span> ${badge}</dd>
   </div>`;
 }
 
 function renderIssues(preview: PlatformPreview): string {
   if (preview.warnings.length === 0) {
-    return `<div class="issues issues-clean">No platform-specific warnings.</div>`;
+    return `<div class="issues issues-clean">No platform warnings.</div>`;
   }
-  const sorted = [...preview.warnings].sort(
-    (a, b) =>
-      (a.severity === "error" ? 0 : a.severity === "warning" ? 1 : 2) -
-      (b.severity === "error" ? 0 : b.severity === "warning" ? 1 : 2),
-  );
+  const order = { error: 0, warning: 1, info: 2 } as const;
+  const sorted = [...preview.warnings].sort((a, b) => order[a.severity] - order[b.severity]);
   return `<ul class="issues">
-${sorted
-  .map(
-    (w) =>
-      `    <li class="issue issue-${w.severity}"><span class="issue-mark"></span>${escapeHtml(w.message)}</li>`,
-  )
-  .join("\n")}
+${sorted.map((w) => `    <li class="issue issue-${w.severity}">${escapeHtml(w.message)}</li>`).join("\n")}
   </ul>`;
 }
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-function renderField(value: string | null): string {
-  if (!value) return `<span class="placeholder">No title</span>`;
-  return escapeHtml(value);
-}
-
-function imgEl(src: string): string {
-  return `<img src="${escapeAttr(src)}" alt="" loading="lazy">`;
-}
-
-function imageSrcFor(preview: PlatformPreview, audit: ImageAudit | null, embed: boolean): string | null {
+function imageSrcFor(
+  preview: PlatformPreview,
+  audit: ImageAudit | null,
+  embed: boolean,
+): string | null {
   if (!preview.image.url) return null;
-  if (audit) return absoluteSrc(audit.resolvedSource, embed, audit.contentType);
-  return absoluteSrc(preview.image.url, embed, null);
+  if (audit) return toImgSrc(audit.resolvedSource, embed, audit.contentType);
+  return toImgSrc(preview.image.url, embed, null);
 }
 
-function absoluteSrc(value: string, embed: boolean, contentType: string | null): string {
+function toImgSrc(value: string, embed: boolean, contentType: string | null): string {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith("data:")) return value;
 
-  // Embed local files as data: URIs so the preview HTML is portable.
-  if (embed && !value.startsWith("http://") && !value.startsWith("https://")) {
+  if (embed) {
     try {
       if (fs.existsSync(value) && fs.statSync(value).isFile()) {
         const buf = fs.readFileSync(value);
@@ -367,7 +297,7 @@ function absoluteSrc(value: string, embed: boolean, contentType: string | null):
     }
   }
 
-  if (value.startsWith("/")) return `file://${value}`;
+  if (path.isAbsolute(value)) return pathToFileURL(value).href;
   return value;
 }
 
@@ -382,101 +312,135 @@ function guessContentType(filePath: string): string | null {
 }
 
 function hostnameFor(page: PageReport): string {
-  const candidate = page.meta.canonical || page.meta.url;
-  if (candidate) {
+  for (const candidate of [page.meta.canonical, page.meta.url, page.source]) {
+    if (!candidate || !/^https?:\/\//i.test(candidate)) continue;
     try {
       return new URL(candidate).hostname.replace(/^www\./, "");
     } catch {
-      // candidate wasn't a valid URL; fall back below
-    }
-  }
-  if (/^https?:\/\//i.test(page.source)) {
-    try {
-      return new URL(page.source).hostname.replace(/^www\./, "");
-    } catch {
-      return page.source;
+      continue;
     }
   }
   return "your-site.com";
 }
 
 function formatDate(d: Date): string {
-  const date = d.toLocaleDateString(undefined, {
+  return d.toLocaleString(undefined, {
     year: "numeric",
-    month: "long",
+    month: "short",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
-  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  return `${date} at ${time}`;
 }
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
-}
-
-// -----------------------------------------------------------------------------
-// Styles — self-contained, hand-tuned. Publication aesthetic, not dashboard.
-// -----------------------------------------------------------------------------
 
 const STYLES = `
-:root { --bg:#fff; --text:#111; --muted:#555; --border:#e5e5e5; --accent:#0a66c2; --ready:#0a7d3e; --warn:#b36b00; --fail:#b71c1c; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace; --sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-* { box-sizing:border-box; }
-html,body { margin:0;padding:0; }
-body { font:14px/1.45 var(--sans); color:var(--text); background:var(--bg); }
-.doc { max-width:1100px; margin:0 auto; padding:28px 20px; }
-.masthead { border-bottom:2px solid var(--text); padding-bottom:16px; margin-bottom:24px; }
-.masthead-brand { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
-.wordmark { font-weight:700; font-size:18px; letter-spacing:.5px; }
-.tagline { font-size:13px; color:var(--muted); }
-.manifest { display:flex; flex-wrap:wrap; gap:8px 16px; font-size:11px; color:var(--muted); }
-.summary { display:flex; align-items:baseline; gap:12px; margin-bottom:24px; }
-.score-num { font-size:48px; font-weight:600; line-height:1; }
-.page { margin-bottom:36px; }
-.page-head { display:flex; align-items:center; gap:8px; padding-bottom:6px; margin-bottom:12px; border-bottom:1px solid var(--border); }
-.page-num { font-family:var(--mono); font-size:16px; color:var(--muted); width:28px; }
-.page-path { font-family:var(--mono); font-size:12px; flex:1; word-break:break-all; margin:0; }
-.page-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; }
-.block { border:1px solid var(--border); }
-.block-head { display:flex; justify-content:space-between; padding:6px 10px; background:#f7f7f7; border-bottom:1px solid var(--border); font-size:10px; }
-.block-platform { font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
-.block-layout { color:var(--muted); }
-.block-stage { padding:12px; background:#fafafa; min-height:140px; display:flex; align-items:center; justify-content:center; }
-.preview { width:100%; max-width:320px; border:1px solid #ddd; background:#fff; overflow:hidden; font-size:12px; }
-.preview-body { padding:6px 8px; }
-.preview-host { font-size:9px; color:#666; text-transform:uppercase; letter-spacing:.5px; margin-bottom:1px; }
-.preview-title { font-weight:600; line-height:1.25; }
-.preview-desc { color:#444; font-size:11px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.preview-img { background:#f0f0f0; overflow:hidden; }
-.preview-img img { width:100%; height:100%; object-fit:cover; display:block; }
-.preview-img-standard { aspect-ratio:1.91/1; }
-.preview-img-tall { aspect-ratio:2/3; }
-.preview-img-square { aspect-ratio:1/1; }
-.preview-none { padding:12px; border:1px dashed #ccc; text-align:center; font-size:11px; color:#666; }
-.ledger { margin:0; padding:6px 10px; border-top:1px solid var(--border); font-size:10px; background:#fff; }
-.ledger-row { display:grid; grid-template-columns:64px 1fr; gap:6px; padding:2px 0; }
-.ledger-row + .ledger-row { border-top:1px dotted #e5e5e5; }
-.ledger dt { font-weight:600; color:#555; }
-.ledger dd { margin:0; }
-.badge { font-size:8px; padding:0 4px; border:1px solid currentColor; border-radius:1px; text-transform:uppercase; }
-.issues { list-style:none; margin:0; padding:6px 10px; border-top:1px solid var(--border); font-size:11px; }
-.issues-clean { color:var(--ready); font-style:italic; }
-.issue { padding-left:12px; position:relative; }
-.issue-mark { position:absolute; left:0; top:5px; width:4px; height:4px; border-radius:50%; background:currentColor; }
-.fixes { margin-top:12px; padding-top:8px; border-top:1px solid var(--border); }
-.fixes-head { display:flex; gap:8px; align-items:baseline; margin-bottom:6px; font-size:12px; font-weight:600; }
-.fix-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
-.fix { display:grid; grid-template-columns:42px 1fr; gap:6px; padding:6px 8px; border:1px solid var(--border); font-size:11px; }
-.fix-snippet { margin-top:4px; padding:4px 6px; background:#111; color:#eee; font-family:var(--mono); font-size:10px; white-space:pre; overflow:auto; }
-.colophon { margin-top:36px; padding-top:12px; border-top:1px solid var(--border); font-size:10px; color:#666; }
-@media (max-width:640px){ .doc{padding:16px 12px;} .page-cards{grid-template-columns:1fr;} }
-`;
+:root {
+  --bg: #ffffff;
+  --surface: #f8f9fa;
+  --text: #18181b;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --pass: #15803d;
+  --pass-bg: #dcfce7;
+  --warn: #a16207;
+  --warn-bg: #fef9c3;
+  --fail: #b91c1c;
+  --fail-bg: #fee2e2;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font: 14px/1.5 var(--sans); color: var(--text); background: var(--bg); }
+code { font-family: var(--mono); font-size: 0.9em; }
+.muted { color: var(--muted); }
+.container { max-width: 1120px; margin: 0 auto; padding: 28px 20px 48px; }
 
+.header { border-bottom: 1px solid var(--border); padding-bottom: 18px; margin-bottom: 28px; }
+.header-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.title { margin: 0 0 6px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+.meta-line { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+
+.summary { text-align: right; }
+.score-badge { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); }
+.score-value { font-size: 28px; font-weight: 700; line-height: 1; }
+.score-max { font-size: 13px; color: var(--muted); }
+.status-pill { font-size: 12px; font-weight: 600; margin-left: 4px; }
+.status-pass { color: var(--pass); background: var(--pass-bg); border-color: #bbf7d0; }
+.status-warn { color: var(--warn); background: var(--warn-bg); border-color: #fde68a; }
+.status-fail { color: var(--fail); background: var(--fail-bg); border-color: #fecaca; }
+.tally { margin-top: 6px; display: flex; justify-content: flex-end; gap: 12px; font-size: 12px; color: var(--muted); }
+.tally strong { color: var(--text); }
+
+.page { margin-bottom: 36px; }
+.page-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.page-index { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.page-path { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 600; flex: 1; word-break: break-all; }
+.page-score { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+
+.cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
+.card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); }
+.card-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 12px; }
+.card-platform { font-weight: 600; }
+.card-layout { color: var(--muted); font-size: 11px; }
+.card-stage { padding: 14px; background: #f1f5f9; min-height: 130px; display: flex; align-items: center; justify-content: center; flex: 1; }
+
+.mockup { width: 100%; max-width: 320px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; overflow: hidden; font-size: 12px; }
+.mockup-summary { display: grid; grid-template-columns: 84px 1fr; align-items: stretch; }
+.mockup-inline { border-left: 3px solid #64748b; display: flex; flex-direction: row-reverse; align-items: center; gap: 10px; padding: 8px 10px; }
+.mockup-inline .mockup-img { width: 56px; height: 56px; border-radius: 4px; flex-shrink: 0; }
+.mockup-inline .mockup-body { padding: 0; flex: 1; min-width: 0; }
+.mockup-body { padding: 8px 10px; min-width: 0; }
+.mockup-host { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mockup-title { font-weight: 600; line-height: 1.3; margin-bottom: 2px; word-break: break-word; }
+.mockup-desc { color: #475569; font-size: 11px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mockup-img { background: #e2e8f0; overflow: hidden; }
+.mockup-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ratio-wide { aspect-ratio: 1.91 / 1; }
+.ratio-tall { aspect-ratio: 2 / 3; max-height: 220px; }
+.ratio-square { aspect-ratio: 1 / 1; }
+.mockup-none { padding: 16px; border: 1px dashed #cbd5e1; text-align: center; color: var(--muted); font-size: 12px; }
+.mockup-empty { margin-top: 4px; }
+
+.details { margin: 0; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; }
+.detail-row { display: grid; grid-template-columns: 74px 1fr; gap: 6px; padding: 3px 0; align-items: baseline; }
+.detail-row + .detail-row { border-top: 1px solid #f1f5f9; }
+.details dt { font-weight: 600; color: var(--muted); }
+.details dd { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+
+.badge { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 3px; line-height: 1.6; }
+.badge-pass { color: var(--pass); background: var(--pass-bg); }
+.badge-warn { color: var(--warn); background: var(--warn-bg); }
+.badge-fail { color: var(--fail); background: var(--fail-bg); }
+
+.issues { list-style: none; margin: 0; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11px; display: flex; flex-direction: column; gap: 4px; }
+.issues-clean { color: var(--pass); }
+.issue { padding-left: 12px; position: relative; }
+.issue::before { content: ""; position: absolute; left: 0; top: 6px; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.issue-error { color: var(--fail); }
+.issue-warning { color: var(--warn); }
+.issue-info { color: var(--muted); }
+
+.fixes { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.fixes-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.fixes-head h3 { margin: 0; font-size: 14px; }
+.fixes-delta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.fix-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.fix-item { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); font-size: 12px; }
+.fix-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; gap: 6px; }
+.fix-weight { color: var(--pass); font-weight: 600; }
+.fix-label { font-weight: 600; margin-bottom: 2px; }
+.fix-explain { margin: 0; color: var(--muted); font-size: 12px; }
+.code-block { margin: 6px 0 0; padding: 8px 10px; background: #0f172a; color: #e2e8f0; border-radius: 5px; font-family: var(--mono); font-size: 11px; overflow-x: auto; white-space: pre; }
+.fix-bundle { margin-top: 10px; font-size: 12px; }
+.fix-bundle summary { cursor: pointer; font-weight: 600; color: var(--text); }
+
+.footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+
+@media (max-width: 640px) {
+  .container { padding: 16px 12px 32px; }
+  .summary { text-align: left; }
+  .tally { justify-content: flex-start; }
+  .cards-grid { grid-template-columns: 1fr; }
+}
+`;

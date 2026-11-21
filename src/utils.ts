@@ -27,12 +27,8 @@ export const SKIP_DIR_NAMES = new Set([
 const ELSEWHERE_SEARCH_MAX_DIRS = 4000;
 
 /**
- * Best-effort search for a file at `relativePath` anywhere under `searchRoot`,
- * skipping `skipDir` (already tried) and common noise directories. Used to tell
- * "genuinely missing" apart from "pointed shipcard at the wrong build output
- * folder" when a reference doesn't resolve where expected. Bounded so a huge
- * tree can't make a single missing-image warning expensive; returns null on
- * any failure or once the search budget is exhausted.
+ * Bounded BFS for `relativePath` anywhere under `searchRoot` (skipping `skipDir`).
+ * Helps distinguish a missing asset from scanning the wrong build output folder.
  */
 export async function findFileElsewhere(
   searchRoot: string,
@@ -48,11 +44,13 @@ export async function findFileElsewhere(
 
     if (dir !== skipDir) {
       const candidate = path.join(dir, relativePath);
-      try {
-        const st = await fsp.stat(candidate);
-        if (st.isFile()) return candidate;
-      } catch {
-        // keep looking
+      if (isInsideDir(searchRoot, candidate)) {
+        try {
+          const st = await fsp.stat(candidate);
+          if (st.isFile()) return candidate;
+        } catch {
+          // keep looking
+        }
       }
     }
 
@@ -69,6 +67,15 @@ export async function findFileElsewhere(
   }
 
   return null;
+}
+
+export function isInsideDir(baseDir: string, candidate: string): boolean {
+  const rel = path.relative(path.resolve(baseDir), path.resolve(candidate));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+export function stripQueryAndHash(value: string): string {
+  return value.split(/[?#]/, 1)[0];
 }
 
 export function isAbsoluteUrl(value: string): boolean {
@@ -101,7 +108,6 @@ export function isRelativeReference(value: string): boolean {
   return !isAbsoluteUrl(value) && !isDataUrl(value);
 }
 
-/** Path-only values that aren't absolute http(s). */
 export function isRelativeOrPathOnly(value: string | null | undefined): boolean {
   if (!value) return false;
   if (isDataUrl(value)) return false;
@@ -114,14 +120,12 @@ export type ResolveContext = {
   baseDir?: string;
   sourceUrl?: string;
   sourceFile?: string;
-  /** Folder originally passed to the scan, for the "found elsewhere in this tree" diagnostic. */
   searchRoot?: string;
 };
 
 /**
  * Resolve an image reference against its HTML's location.
- * When baseDir is set, absolute http(s) URLs are mapped to local files by pathname
- * when those files exist (local-first for folder audits).
+ * When baseDir is set, absolute http(s) URLs map to local files by pathname if present.
  */
 export function resolveReference(
   reference: string,
@@ -144,7 +148,7 @@ export function resolveReference(
     return { resolved: reference, external: true };
   }
 
-  // Remote page audits: resolve relative refs against the page URL first.
+  // Remote page audits resolve relative references against the page URL.
   const urlBase = ctx.sourceUrl ?? ctx.baseUrl;
   if (urlBase) {
     try {
@@ -154,24 +158,33 @@ export function resolveReference(
     }
   }
 
-  // Root-relative paths anchor at the folder root, not the HTML file's directory.
-  if (reference.startsWith("/") && ctx.baseDir) {
-    const resolved = path.resolve(ctx.baseDir, "." + reference);
-    return { resolved, external: false, localPath: resolved };
+  const cleanRef = safeDecode(stripQueryAndHash(reference));
+
+  // Root-relative paths anchor at baseDir, not the HTML file's directory.
+  if (cleanRef.startsWith("/") && ctx.baseDir) {
+    const resolved = path.resolve(ctx.baseDir, "." + cleanRef);
+    if (isInsideDir(ctx.baseDir, resolved)) {
+      return { resolved, external: false, localPath: resolved };
+    }
+    return { resolved: reference, external: false };
   }
 
   const dirBase = ctx.sourceFile ? path.dirname(ctx.sourceFile) : ctx.baseDir;
   if (dirBase) {
-    const resolved = path.resolve(dirBase, reference);
-    return { resolved, external: false, localPath: resolved };
+    const resolved = path.resolve(dirBase, cleanRef);
+    const rootBoundary = ctx.baseDir ?? dirBase;
+    if (isInsideDir(rootBoundary, resolved)) {
+      return { resolved, external: false, localPath: resolved };
+    }
+    return { resolved: reference, external: false };
   }
 
   return { resolved: reference, external: false };
 }
 
 /**
- * Map https://host/path/to/img.png → baseDir/path/to/img.png when the file exists.
- * Also tries baseDir/public/<pathname> for Vite-style layouts.
+ * Map https://host/path/to/img.png to baseDir/path/to/img.png (or baseDir/public/...)
+ * when the file exists inside baseDir.
  */
 export function localFileForHttpUrl(url: string, baseDir?: string): string | null {
   if (!baseDir) return null;
@@ -189,6 +202,7 @@ export function localFileForHttpUrl(url: string, baseDir?: string): string | nul
   ];
 
   for (const candidate of candidates) {
+    if (!isInsideDir(baseDir, candidate)) continue;
     try {
       if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
         return candidate;
@@ -198,6 +212,14 @@ export function localFileForHttpUrl(url: string, baseDir?: string): string | nul
     }
   }
   return null;
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 export function firstNonEmpty(...values: Array<string | null | undefined>): string | null {
@@ -211,4 +233,13 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

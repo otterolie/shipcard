@@ -1,112 +1,89 @@
 import pc from "picocolors";
-import type { AuditReport, CardLayout, PageReport, PageStatus, PlatformPreview, Warning } from "./types.js";
+import type {
+  AuditReport,
+  CardLayout,
+  PageReport,
+  PageStatus,
+  PlatformPreview,
+  Warning,
+} from "./types.js";
 import { formatBytes } from "./utils.js";
 import { statusFromScore } from "./score.js";
 import { fixesForPage, type Fix } from "./fixes.js";
 
 const SEVERITY_ORDER: Record<Warning["severity"], number> = { error: 0, warning: 1, info: 2 };
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
-const STATUS_PAINT: Record<PageStatus, { icon: string; label: string; line: string }> = {
-  ready:   { icon: pc.green("✓"),  label: pc.green("Ready to ship"),   line: pc.green("Ready to ship") },
-  warning: { icon: pc.yellow("⚠"), label: pc.yellow("Minor leaks"),    line: pc.yellow("Minor leaks found") },
-  fail:    { icon: pc.red("✕"),    label: pc.red("Ship blocked"),      line: pc.red("Ship blocked") },
+const STATUS_PAINT: Record<PageStatus, { icon: string; label: string }> = {
+  pass: { icon: pc.green("✓"), label: pc.green("Pass") },
+  warn: { icon: pc.yellow("⚠"), label: pc.yellow("Warn") },
+  fail: { icon: pc.red("✕"), label: pc.red("Fail") },
 };
 
-/** Render an AuditReport as a terminal-friendly string. */
-export function renderTerminal(report: AuditReport): string {
-  const lines = [pc.bold(pc.cyan("Shipcard")), "", `Target: ${report.target.input}`];
-  const body =
+const CARD_LAYOUT_LABELS: Record<CardLayout, string> = {
+  large: "Large image card",
+  summary: "Summary card",
+  inline: "Inline preview",
+  none: "Text only",
+};
+
+/** Render an AuditReport for terminal output. Pass `{ color: false }` for plain text files. */
+export function renderTerminal(report: AuditReport, options: { color?: boolean } = {}): string {
+  const lines = [pc.bold(pc.cyan("shipcard")), "", `Target: ${report.target.input}`];
+  const output =
     report.target.type === "folder" ? renderFolder(report, lines) : renderSingle(report, lines);
-  return appendWhatToDo(body, report);
-}
-
-function appendWhatToDo(text: string, report: AuditReport): string {
-  const plan = report.plan;
-  if (!plan || plan.actions.length === 0) return text;
-
-  const lines = [text.replace(/\n$/, ""), "", pc.bold("What to do:"), pc.dim(plan.summary)];
-  const show = plan.actions.slice(0, 8);
-  for (const a of show) {
-    const impact = a.impact > 0 ? pc.cyan(`+${a.impact}`) : pc.dim(" · ");
-    const scope = a.pages.length > 1 ? pc.dim(` (${a.pages.length} pages)`) : "";
-    lines.push(`  ${pc.dim(String(a.priority).padStart(2))}. ${impact}  ${a.title}${scope}`);
-    if (a.snippet) {
-      lines.push(pc.dim(`      ${a.snippet.length > 88 ? a.snippet.slice(0, 87) + "…" : a.snippet}`));
-    } else {
-      lines.push(pc.dim(`      ${a.how.length > 100 ? a.how.slice(0, 99) + "…" : a.how}`));
-    }
-  }
-  if (plan.actions.length > show.length) {
-    lines.push(pc.dim(`  … +${plan.actions.length - show.length} more (see --json plan.actions)`));
-  }
-  if (plan.next.length > 0) {
-    lines.push(pc.dim(`Next: ${plan.next[0]}`));
-  }
-  lines.push("");
-  return lines.join("\n");
+  return options.color === false ? output.replace(ANSI_RE, "") : output;
 }
 
 function renderFolder(report: AuditReport, lines: string[]): string {
-  const fleetStatus = statusFromScore(report.summary.score);
-  lines.push(`Pages scanned: ${report.summary.pagesScanned}`);
-  lines.push(`Fleet score: ${report.summary.score}/100`);
-  lines.push(`Status: ${STATUS_PAINT[fleetStatus].line}`);
+  const overall = statusFromScore(report.summary.score);
+  lines.push(`Pages: ${report.summary.pagesScanned}`);
+  lines.push(`Score: ${report.summary.score}/100 (${STATUS_PAINT[overall].label})`);
   lines.push("");
   lines.push(pc.bold("Pages:"));
 
-  const pathWidth = Math.min(40, Math.max(12, ...report.pages.map((p) => p.path.length)));
+  const pathWidth = Math.min(44, Math.max(12, ...report.pages.map((p) => p.path.length)));
 
   for (const page of report.pages) {
     const { icon, label } = STATUS_PAINT[page.status];
-    const path = page.path.padEnd(pathWidth);
-    const score = String(page.score).padEnd(4);
-    lines.push(`${icon} ${path}  ${score}  ${label}`);
+    lines.push(`${icon} ${page.path.padEnd(pathWidth)}  ${String(page.score).padEnd(4)}  ${label}`);
   }
 
-  // Group identical leak signatures so 56 copies of the same 404 don't print 56 times.
   const groups = groupWarningSignatures(report.pages);
   const shared = groups.filter((g) => g.paths.length >= 2);
   const sharedKeys = new Set(shared.map((g) => g.key));
 
   if (shared.length > 0) {
-    lines.push("", pc.bold("Shared leaks:"));
+    lines.push("", pc.bold("Shared issues:"));
     for (const g of sortGroups(shared)) {
-      lines.push(`  ${severityBullet(g.warning)}${g.paths.length} pages — ${g.warning.message}`);
+      lines.push(`  ${severityBullet(g.warning)}${g.paths.length} pages: ${g.warning.message}`);
       lines.push(pc.dim(`    ${formatPathList(g.paths)}`));
     }
   }
 
   for (const page of report.pages) {
-    if (page.status === "ready") continue;
+    if (page.status === "pass") continue;
     const unique = page.warnings.filter((w) => !sharedKeys.has(warningKey(w)));
-    // Skip empty page blocks when everything was covered by Shared leaks
     if (unique.length === 0 && page.warnings.length > 0) continue;
 
-    lines.push("");
-    lines.push(pc.bold(page.path));
+    lines.push("", pc.bold(page.path));
     if (unique.length > 0) {
-      lines.push(pc.dim("Leaks:"));
+      lines.push(pc.dim("Issues:"));
       for (const w of sortWarnings(unique)) {
         lines.push(`  ${severityBullet(w)}${w.message}`);
       }
-    } else if (page.warnings.length === 0) {
-      // status not ready but no warnings (score-only) — still show fixes
     }
     appendFixHint(lines, page, report);
   }
 
-  // One shared fix summary when many pages share the same failure and we skipped per-page blocks
   if (shared.length > 0) {
-    const sample = report.pages.find((p) => p.status !== "ready" && p.warnings.some((w) => sharedKeys.has(warningKey(w))));
-    if (sample) {
-      const onlyShared = report.pages
-        .filter((p) => p.status !== "ready")
-        .every((p) => p.warnings.every((w) => sharedKeys.has(warningKey(w))));
-      if (onlyShared) {
-        lines.push("");
-        lines.push(pc.dim("Fixes apply across the shared leaks above (same tags on each page)."));
-        appendFixHint(lines, sample, report);
-      }
+    const failingPages = report.pages.filter((p) => p.status !== "pass");
+    const onlyShared =
+      failingPages.length > 0 &&
+      failingPages.every((p) => p.warnings.every((w) => sharedKeys.has(warningKey(w))));
+    if (onlyShared) {
+      lines.push("", pc.dim("Fixes for the shared issues above:"));
+      appendFixHint(lines, failingPages[0], report);
     }
   }
 
@@ -116,12 +93,11 @@ function renderFolder(report: AuditReport, lines: string[]): string {
 
 function renderSingle(report: AuditReport, lines: string[]): string {
   const page = report.pages[0];
-  if (!page) return [...lines, pc.red("No page audited.")].join("\n");
+  if (!page) return [...lines, pc.red("No page audited."), ""].join("\n");
 
-  lines.push(`Score: ${page.score}/100`);
-  lines.push(`Status: ${STATUS_PAINT[page.status].line}`);
+  lines.push(`Score: ${page.score}/100 (${STATUS_PAINT[page.status].label})`);
   lines.push("");
-  lines.push(pc.bold("Deck check:"));
+  lines.push(pc.bold("Checks:"));
   for (const c of page.checks) {
     const mark = c.passed ? pc.green("✓") : pc.red("✕");
     lines.push(`  ${mark} ${c.label} ${pc.dim(`(${c.weight})`)}`);
@@ -135,42 +111,39 @@ function renderSingle(report: AuditReport, lines: string[]): string {
   lines.push(formatField("canonical", page.meta.canonical));
   lines.push(formatField("twitter:card", page.meta.twitterCard));
 
-  if (page.image) {
-    lines.push("", pc.bold("Image:"));
-    lines.push(`  Source: ${page.image.resolvedSource}`);
-    if (page.image.width && page.image.height) {
-      lines.push(`  Dimensions: ${page.image.width}x${page.image.height}`);
+  const images = page.images && page.images.length > 0 ? page.images : page.image ? [page.image] : [];
+  if (images.length > 0) {
+    lines.push("", pc.bold(images.length > 1 ? "Images:" : "Image:"));
+    for (const img of images) {
+      lines.push(`  Source: ${img.resolvedSource}`);
+      if (img.width && img.height) {
+        lines.push(`  Dimensions: ${img.width}x${img.height}`);
+      }
+      if (img.sizeBytes !== null) lines.push(`  Size: ${formatBytes(img.sizeBytes)}`);
+      if (img.contentType) lines.push(`  Content type: ${img.contentType}`);
     }
-    if (page.image.sizeBytes !== null) lines.push(`  Size: ${formatBytes(page.image.sizeBytes)}`);
-    if (page.image.contentType) lines.push(`  Content type: ${page.image.contentType}`);
   }
 
   if (page.warnings.length > 0) {
-    lines.push("", pc.bold("Leaks:"));
+    lines.push("", pc.bold("Issues:"));
     for (const w of sortWarnings(page.warnings)) {
       lines.push(`  ${severityBullet(w)}${w.message}`);
     }
   }
 
-  if (page.status !== "ready") {
+  if (page.status !== "pass") {
+    lines.push("");
     appendFixHint(lines, page, report);
   }
 
   if (page.platforms.length > 0) {
-    lines.push("", pc.bold("Platform previews:"));
+    lines.push("", pc.bold("Platforms:"));
     for (const line of renderPlatformTable(page.platforms)) lines.push("  " + line);
   }
 
   lines.push("");
   return lines.join("\n");
 }
-
-const CARD_LAYOUT_LABELS: Record<CardLayout, string> = {
-  large: "Large image card",
-  summary: "Summary card",
-  inline: "Inline preview",
-  none: "Text only",
-};
 
 function renderPlatformTable(platforms: PlatformPreview[]): string[] {
   const labelWidth = Math.max(...platforms.map((p) => p.label.length));
@@ -179,7 +152,6 @@ function renderPlatformTable(platforms: PlatformPreview[]): string[] {
   return platforms.map((p) => {
     const errors = p.warnings.filter((w) => w.severity === "error");
     const warns = p.warnings.filter((w) => w.severity === "warning");
-    const infos = p.warnings.filter((w) => w.severity === "info");
     const icon =
       errors.length > 0 ? pc.red("✕") : warns.length > 0 ? pc.yellow("⚠") : pc.green("✓");
     const label = p.label.padEnd(labelWidth);
@@ -187,20 +159,15 @@ function renderPlatformTable(platforms: PlatformPreview[]): string[] {
     const truncated = [p.title, p.description].filter((f) => f.truncated).length;
     const truncatedNote = truncated > 0 ? pc.dim(` (${truncated} truncated)`) : "";
 
-    // Surface why a platform is ⚠/✕ without requiring --preview
-    const reason =
-      errors[0]?.message ?? warns[0]?.message ?? (p.cardLayout !== "large" && infos[0]?.message) ?? null;
-    const reasonNote =
-      reason && (errors.length > 0 || warns.length > 0)
-        ? pc.dim(` — ${truncateReason(reason)}`)
-        : "";
+    const reason = errors[0]?.message ?? warns[0]?.message ?? null;
+    const reasonNote = reason ? pc.dim(` - ${truncateText(reason, 85)}`) : "";
 
     return `${icon} ${label}  ${pc.dim("→")} ${layout}${truncatedNote}${reasonNote}`;
   });
 }
 
-function truncateReason(msg: string, max = 90): string {
-  const one = msg.replace(/\s+/g, " ").trim();
+function truncateText(text: string, max: number): string {
+  const one = text.replace(/\s+/g, " ").trim();
   return one.length > max ? one.slice(0, max - 1) + "…" : one;
 }
 
@@ -208,7 +175,9 @@ function warningKey(w: Warning): string {
   return `${w.code}\0${w.message}`;
 }
 
-function groupWarningSignatures(pages: PageReport[]): Array<{ key: string; warning: Warning; paths: string[] }> {
+function groupWarningSignatures(
+  pages: PageReport[],
+): Array<{ key: string; warning: Warning; paths: string[] }> {
   const map = new Map<string, { key: string; warning: Warning; paths: string[] }>();
   for (const page of pages) {
     const seenOnPage = new Set<string>();
@@ -239,8 +208,7 @@ function sortGroups(
 
 function formatPathList(paths: string[], maxShow = 8): string {
   if (paths.length <= maxShow) return paths.join(", ");
-  const head = paths.slice(0, maxShow).join(", ");
-  return `${head}, … +${paths.length - maxShow} more`;
+  return `${paths.slice(0, maxShow).join(", ")}, +${paths.length - maxShow} more`;
 }
 
 function formatField(label: string, value: string | null): string {
@@ -263,21 +231,16 @@ function appendFixHint(lines: string[], page: PageReport, report: AuditReport): 
   const points = fixes.reduce((s, f) => s + f.weight, 0);
   const target = Math.min(100, page.score + points);
   const headline =
-    points > 0
-      ? `Fix it: ${page.score} → ${target} (+${points})`
-      : "Fix it (quality improvements):";
-  lines.push(pc.dim(headline));
+    points > 0 ? `Fixes (${page.score} → ${target}, +${points}):` : "Fixes:";
+  lines.push(pc.bold(headline));
   const labelWidth = Math.max(...fixes.map((f) => f.label.length));
   for (const fix of fixes) {
-    const weight = fix.weight > 0 ? pc.cyan(`+${String(fix.weight).padStart(2)}`) : pc.dim(" · ");
+    const weight = fix.weight > 0 ? pc.cyan(`+${fix.weight}`.padStart(3)) : pc.dim("  ·");
     lines.push(`  ${weight}  ${fix.label.padEnd(labelWidth)}  ${snippetPreview(fix)}`);
   }
 }
 
 function snippetPreview(fix: Fix): string {
-  if (!fix.snippet) return pc.dim("(see --preview for details)");
-  const max = 70;
-  const single = fix.snippet.replace(/\s+/g, " ").trim();
-  const trimmed = single.length > max ? single.slice(0, max - 1) + "…" : single;
-  return pc.dim(trimmed);
+  if (!fix.snippet) return pc.dim(truncateText(fix.explain, 70));
+  return pc.dim(truncateText(fix.snippet, 70));
 }

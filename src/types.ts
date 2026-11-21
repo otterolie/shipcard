@@ -47,7 +47,7 @@ export type CheckResult = {
   weight: number;
 };
 
-export type PageStatus = "ready" | "warning" | "fail";
+export type PageStatus = "pass" | "warn" | "fail";
 
 export type Platform =
   | "meta"
@@ -66,25 +66,20 @@ export type CardLayout = "large" | "summary" | "inline" | "none";
 
 export type PlatformField = {
   value: string | null;
-  /** Which source tag the platform read from (e.g. "og:title", "twitter:title"), or null when missing. */
   source: string | null;
   truncated: boolean;
-  /** The character limit applied, or null if the platform has no documented limit. */
   charLimit: number | null;
 };
 
 export type PlatformImage = {
   url: string | null;
   source: "og:image" | "twitter:image" | null;
-  /** Whether the image meets the platform's minimum dimensions for its preferred card. */
   meetsMinimum: boolean;
-  /** Whether the image qualifies for the platform's large/hero card layout. */
   rendersAsLarge: boolean;
 };
 
 export type PlatformPreview = {
   platform: Platform;
-  /** Human label, e.g. "Meta (Facebook)". */
   label: string;
   cardLayout: CardLayout;
   title: PlatformField;
@@ -103,14 +98,14 @@ export type PageReport = {
   meta: SocialMeta;
   /** Primary image probe (first og:image, else first twitter:image). */
   image: ImageAudit | null;
-  /** Every distinct social image validated (og + twitter). */
+  /** Every distinct social image validated on the page. */
   images?: ImageAudit[];
   checks: CheckResult[];
   warnings: Warning[];
   platforms: PlatformPreview[];
 };
 
-export type TargetType = "url" | "folder";
+export type TargetType = "url" | "folder" | "file" | "stdin";
 
 export type AuditReport = {
   tool: "shipcard";
@@ -123,32 +118,18 @@ export type AuditReport = {
   summary: {
     score: number;
     pagesScanned: number;
-    ready: number;
+    passed: number;
     warnings: number;
     failed: number;
   };
   pages: PageReport[];
-  /**
-   * Agent-oriented action plan (present on CLI --json and advise()).
-   * Optional so programmatic callers that build reports by hand stay valid.
-   */
-  plan?: import("./plan.js").Plan;
 };
 
 export type AuditOptions = {
-  /** Base URL or folder used to resolve relative image references. */
   baseUrl?: string;
-  /** Filesystem root used when resolving local image paths. */
   baseDir?: string;
-  /** Whether to fetch and validate referenced images. Default true. */
   validateImages?: boolean;
-  /**
-   * When true, never hit the network for images. Absolute URLs are only checked
-   * if they map to a file under baseDir. Ideal for pre-launch folder audits.
-   */
   offline?: boolean;
-  /** Timeout in ms when fetching remote resources. */
   timeoutMs?: number;
-  /** Version string in reports / User-Agent. Defaults to package version. */
   version?: string;
 };

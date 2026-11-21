@@ -2,20 +2,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { auditHtml } from "./audit-html.js";
 import { buildReport } from "./report.js";
+import type { ImageProbeCache } from "./validate-image.js";
 import { VERSION } from "./version.js";
 import { SKIP_DIR_NAMES } from "./utils.js";
 import type { AuditOptions, AuditReport, PageReport } from "./types.js";
 
-/** Top-level dirs we auto-scan when the target folder itself has no HTML. */
 const BUILD_DIR_NAMES = ["dist", "out", "build", "public", ".output", "export"];
-
-/**
- * Subfolder names that hold the real static output in a split client/server build
- * (Astro's node adapter, Next.js `standalone` output, SvelteKit's adapter-node all
- * nest the deployable static site one level below the folder you'd naturally point
- * shipcard at).
- */
+const BUILD_DIR_SET = new Set(BUILD_DIR_NAMES);
 const SPLIT_OUTPUT_DIR_NAMES = new Set(["client", "public", "static", "www"]);
+const PAGE_CONCURRENCY = 8;
 
 export class NoHtmlFilesError extends Error {
   constructor(folder: string, hint?: string) {
@@ -25,9 +20,8 @@ export class NoHtmlFilesError extends Error {
 }
 
 /**
- * Scan a folder for .html files and audit each one. Image references are resolved
- * relative to the HTML file (or to the folder root for root-relative paths).
- * Absolute production image URLs are mapped to local files by pathname when present.
+ * Scan a folder for .html files and audit each one.
+ * Auto-detects standard build directories and split client/server outputs.
  */
 export async function auditFolder(
   folder: string,
@@ -45,26 +39,29 @@ export async function auditFolder(
     throw new NoHtmlFilesError(folder, hint);
   }
 
-  const pages: PageReport[] = [];
+  const tasks: Array<{ file: string; logical: string; root: string }> = [];
   const seen = new Set<string>();
 
   for (const root of roots) {
     const files = await listHtmlFiles(root);
     for (const rel of files) {
       const full = path.join(root, rel);
-      // Logical path relative to the user-facing target folder
       const logical = "/" + path.relative(absFolder, full).split(path.sep).join("/");
       if (seen.has(logical)) continue;
       seen.add(logical);
-      // Resolve assets against the scan root (dist/public), not the monorepo root
-      pages.push(await auditOnePage(full, logical, root, absFolder, options));
+      tasks.push({ file: full, logical, root });
     }
   }
 
-  if (pages.length === 0) {
+  if (tasks.length === 0) {
     const hint = await missingHtmlHint(absFolder);
     throw new NoHtmlFilesError(folder, hint);
   }
+
+  const imageCache: ImageProbeCache = new Map();
+  const pages = await mapWithConcurrency(tasks, PAGE_CONCURRENCY, ({ file, logical, root }) =>
+    auditOnePage(file, logical, root, absFolder, options, imageCache),
+  );
 
   pages.sort((a, b) => a.path.localeCompare(b.path));
 
@@ -75,14 +72,21 @@ export async function auditFolder(
   });
 }
 
-/**
- * Prefer HTML under the target itself; if none, scan known build output dirs one level down.
- */
 async function resolveScanRoots(absFolder: string): Promise<string[]> {
   const direct = await listHtmlFiles(absFolder);
   if (direct.length > 0) {
-    const splitRoots = splitOutputRootsFor(absFolder, direct);
-    if (splitRoots) return splitRoots;
+    const buildRoots = nestedRootsFor(absFolder, direct, BUILD_DIR_SET);
+    if (buildRoots) {
+      const resolved: string[] = [];
+      for (const { dir, subPaths } of buildRoots) {
+        const split = nestedRootsFor(dir, subPaths, SPLIT_OUTPUT_DIR_NAMES);
+        resolved.push(...(split ? split.map((s) => s.dir) : [dir]));
+      }
+      return resolved;
+    }
+
+    const splitRoots = nestedRootsFor(absFolder, direct, SPLIT_OUTPUT_DIR_NAMES);
+    if (splitRoots) return splitRoots.map((s) => s.dir);
     return [absFolder];
   }
 
@@ -93,7 +97,9 @@ async function resolveScanRoots(absFolder: string): Promise<string[]> {
       const st = await fs.stat(candidate);
       if (!st.isDirectory()) continue;
       const html = await listHtmlFiles(candidate);
-      if (html.length > 0) roots.push(candidate);
+      if (html.length === 0) continue;
+      const split = nestedRootsFor(candidate, html, SPLIT_OUTPUT_DIR_NAMES);
+      roots.push(...(split ? split.map((s) => s.dir) : [candidate]));
     } catch {
       // missing
     }
@@ -102,26 +108,30 @@ async function resolveScanRoots(absFolder: string): Promise<string[]> {
 }
 
 /**
- * If every HTML file found under the scanned folder lives inside one of the known
- * split-output subfolder names (client/, public/, static/, www/), treat those
- * subfolders as the real site roots instead of the flat outer folder. Root-relative
- * asset paths (og:image="/x.png") need to resolve against the true site root, not an
- * outer build directory that also holds server-only bundles with no meaning for local
- * file resolution. Returns null (don't override) when HTML also exists outside those
- * named subfolders — mixed shapes aren't worth guessing about.
+ * If every HTML file lives inside one of `allowedDirs`, group by those subfolders
+ * so root-relative image paths resolve against the actual static output root.
  */
-function splitOutputRootsFor(absFolder: string, relativeHtmlPaths: string[]): string[] | null {
-  const topSegments = new Set<string>();
+function nestedRootsFor(
+  absFolder: string,
+  relativeHtmlPaths: string[],
+  allowedDirs: Set<string>,
+): Array<{ dir: string; subPaths: string[] }> | null {
+  const grouped = new Map<string, string[]>();
   for (const rel of relativeHtmlPaths) {
-    const first = rel.split(path.sep)[0];
-    if (!SPLIT_OUTPUT_DIR_NAMES.has(first)) return null;
-    topSegments.add(first);
+    const sepIdx = rel.indexOf(path.sep);
+    if (sepIdx === -1) return null;
+    const first = rel.slice(0, sepIdx);
+    if (!allowedDirs.has(first)) return null;
+    const rest = rel.slice(sepIdx + 1);
+    (grouped.get(first) ?? grouped.set(first, []).get(first)!).push(rest);
   }
-  if (topSegments.size === 0) return null;
-  return [...topSegments].sort().map((seg) => path.join(absFolder, seg));
+  if (grouped.size === 0) return null;
+  return [...grouped.keys()]
+    .sort()
+    .map((seg) => ({ dir: path.join(absFolder, seg), subPaths: grouped.get(seg)! }));
 }
 
-async function missingHtmlHint(absFolder: string): Promise<string | undefined> {
+async function missingHtmlHint(absFolder: string): Promise<string> {
   const existing: string[] = [];
   for (const name of BUILD_DIR_NAMES) {
     try {
@@ -132,9 +142,9 @@ async function missingHtmlHint(absFolder: string): Promise<string | undefined> {
     }
   }
   if (existing.length > 0) {
-    return `Found ${existing.join(", ")} but no HTML inside. Build the site first, or point shipcard at the output folder.`;
+    return `Found ${existing.join(", ")} with no HTML inside. Build the site first or pass the output folder.`;
   }
-  return "Point shipcard at a built site folder (./dist, ./out, ./build, ./public).";
+  return "Pass a built site folder (for example ./dist, ./out, ./build, or ./public).";
 }
 
 async function listHtmlFiles(absFolder: string): Promise<string[]> {
@@ -161,12 +171,33 @@ async function listHtmlFiles(absFolder: string): Promise<string[]> {
   return files.sort();
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  async function run(): Promise<void> {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await worker(items[idx]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => run());
+  await Promise.all(workers);
+  return results;
+}
+
 async function auditOnePage(
   file: string,
   logicalPath: string,
   baseDir: string,
   searchRoot: string,
   options: AuditOptions,
+  imageCache: ImageProbeCache,
 ): Promise<PageReport> {
   try {
     const html = await fs.readFile(file, "utf8");
@@ -179,6 +210,7 @@ async function auditOnePage(
       validateImages: options.validateImages,
       timeoutMs: options.timeoutMs,
       offline: options.offline,
+      imageCache,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

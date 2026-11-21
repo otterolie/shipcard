@@ -1,7 +1,7 @@
 {
   "name": "@otterolie/shipcard",
-  "version": "0.1.2",
-  "description": "Catch broken social cards before you ship. Local-first preflight for Open Graph, X, LinkedIn, Pinterest, WhatsApp, Telegram, Bluesky, Mastodon and more — score, fixes, and HTML previews. No uploads.",
+  "version": "0.2.0",
+  "description": "Check Open Graph, Twitter, and social link preview tags before you ship. Audits local builds or live URLs with scoring, fix snippets, and HTML previews.",
   "keywords": [
     "open-graph",
     "og",
@@ -11,8 +11,7 @@
     "og-image",
     "social-cards",
     "link-preview",
-    "cli",
-    "preflight"
+    "cli"
   ],
   "author": "Otter Olie",
   "license": "MIT",
@@ -48,20 +47,20 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
-    "image-size": "^2.0.2",
+    "image-size": "^2.1.0",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
-    "tsup": "^8.3.0",
-    "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
   }
 }

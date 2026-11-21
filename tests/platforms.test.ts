@@ -63,24 +63,44 @@ describe("platformPreviews — fallback chains", () => {
     expect(x2.title.value).toBe("OG only");
   });
 
-  it("LinkedIn ignores twitter:* entirely", () => {
+  it("LinkedIn and Meta ignore twitter:* tags", () => {
     const meta = extractMeta(richHtml);
     const li = byPlatform(platformPreviews(meta, imageAudit()), "linkedin");
     expect(li.title.source).toBe("og:title");
     expect(li.description.source).toBe("og:description");
     expect(li.image.source).toBe("og:image");
-  });
 
-  it("Meta (Facebook) ignores twitter:* entirely", () => {
-    const meta = extractMeta(richHtml);
     const fb = byPlatform(platformPreviews(meta, imageAudit()), "meta");
     expect(fb.title.source).toBe("og:title");
     expect(fb.image.source).toBe("og:image");
   });
+
+  it("uses per-image probes when images array is passed", () => {
+    const meta = extractMeta(richHtml);
+    const ogProbe = imageAudit({ source: "https://example.com/og.png", width: 1200, height: 630 });
+    const twProbe = imageAudit({
+      source: "https://example.com/twitter.png",
+      found: false,
+      width: null,
+      height: null,
+    });
+    const previews = platformPreviews(meta, ogProbe, [ogProbe, twProbe]);
+    expect(byPlatform(previews, "meta").image.rendersAsLarge).toBe(true);
+    expect(byPlatform(previews, "x").image.meetsMinimum).toBe(false);
+    expect(byPlatform(previews, "x").cardLayout).toBe("summary");
+  });
+
+  it("marks failed/404 image probes as meetsMinimum = false", () => {
+    const meta = extractMeta(richHtml);
+    const missing = imageAudit({ found: false, width: null, height: null });
+    const fb = byPlatform(platformPreviews(meta, missing), "meta");
+    expect(fb.image.meetsMinimum).toBe(false);
+    expect(fb.cardLayout).toBe("none");
+  });
 });
 
 describe("platformPreviews — truncation", () => {
-  it("X truncates titles to ~70 chars and marks truncated=true", () => {
+  it("X truncates titles to 70 chars", () => {
     const meta = extractMeta(richHtml);
     const x = byPlatform(platformPreviews(meta, imageAudit()), "x");
     expect(x.title.truncated).toBe(true);
@@ -88,14 +108,13 @@ describe("platformPreviews — truncation", () => {
     expect(x.title.value?.endsWith("…")).toBe(true);
   });
 
-  it("Discord allows much longer titles (256 chars) without truncating", () => {
+  it("Discord allows titles up to 256 chars without truncating", () => {
     const meta = extractMeta(richHtml);
     const d = byPlatform(platformPreviews(meta, imageAudit()), "discord");
-    // longTitle is 120 chars, under Discord's 256 limit
     expect(d.title.truncated).toBe(false);
   });
 
-  it("iMessage truncates titles aggressively (60 chars)", () => {
+  it("iMessage truncates titles to 60 chars", () => {
     const meta = extractMeta(richHtml);
     const im = byPlatform(platformPreviews(meta, imageAudit()), "imessage");
     expect(im.title.truncated).toBe(true);
@@ -172,8 +191,8 @@ describe("platformPreviews — Discord card layout", () => {
   });
 });
 
-describe("platformPreviews — emits all supported platforms", () => {
-  it("always returns the supported platforms in order (11 as of 0.3.0)", () => {
+describe("platformPreviews — supported platforms", () => {
+  it("returns all 11 supported platforms in order", () => {
     const meta = extractMeta(`<html><head></head></html>`);
     const previews = platformPreviews(meta, null);
     expect(previews.map((p) => p.platform)).toEqual([
@@ -190,9 +209,7 @@ describe("platformPreviews — emits all supported platforms", () => {
       "imessage",
     ]);
   });
-});
 
-describe("platformPreviews — new platforms (Pinterest / WhatsApp / etc.)", () => {
   it("Pinterest warns on non-tall images and prefers og:image", () => {
     const meta = extractMeta(`<html><head><meta property="og:image" content="https://ex.com/og.png" /></head></html>`);
     const p = byPlatform(platformPreviews(meta, imageAudit({ width: 1200, height: 630 })), "pinterest");
@@ -200,7 +217,7 @@ describe("platformPreviews — new platforms (Pinterest / WhatsApp / etc.)", () 
     expect(p.warnings.some((w) => w.code === "pinterest-image-not-vertical")).toBe(true);
   });
 
-  it("WhatsApp surfaces size guidance when image >600KB (via probe)", () => {
+  it("WhatsApp warns when image exceeds 600 KB", () => {
     const meta = extractMeta(`<html><head><meta property="og:image" content="https://ex.com/big.jpg" /></head></html>`);
     const big = imageAudit({ sizeBytes: 800 * 1024, width: 1200, height: 630 });
     const wa = byPlatform(platformPreviews(meta, big), "whatsapp");

@@ -3,7 +3,7 @@ import { buildReport } from "./report.js";
 import { VERSION } from "./version.js";
 import type { AuditOptions, AuditReport } from "./types.js";
 
-/** Fetch a URL and audit the response body. */
+/** Fetch a URL and audit the HTML response. */
 export async function auditUrl(url: string, options: AuditOptions = {}): Promise<AuditReport> {
   const version = options.version ?? VERSION;
   const controller = new AbortController();

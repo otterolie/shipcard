@@ -47,10 +47,11 @@ describe("extractMeta", () => {
     expect(meta.raw.openGraph["title"]).toBeUndefined();
   });
 
-  it("falls back to meta description when og:description is missing", () => {
-    const html = `<html><head><meta name="description" content="A page."></head></html>`;
+  it("falls back to meta description case-insensitively", () => {
+    const html = `<html><head><meta name="Description" content="A page."></head></html>`;
     const meta = extractMeta(html);
     expect(meta.description).toBe("A page.");
+    expect(meta.raw.metaDescription).toBe("A page.");
   });
 
   it("falls back to twitter:image when og:image is missing", () => {
@@ -58,6 +59,12 @@ describe("extractMeta", () => {
     const meta = extractMeta(html);
     expect(meta.image).toBe("https://x.test/t.png");
     expect(meta.twitterImage).toBe("https://x.test/t.png");
+  });
+
+  it("supports og:image:url when og:image is omitted", () => {
+    const html = `<html><head><meta property="og:image:url" content="https://x.test/u.png"></head></html>`;
+    const meta = extractMeta(html);
+    expect(meta.image).toBe("https://x.test/u.png");
   });
 
   it("captures duplicate tags in raw buckets", () => {
@@ -102,7 +109,7 @@ describe("extractMeta", () => {
     expect(meta.raw.openGraph["title"]).toBeUndefined();
   });
 
-  it("accepts og:* on name= and twitter:* on property= (real-world tolerance)", () => {
+  it("accepts og:* on name= and twitter:* on property=", () => {
     const html = `
       <html><head>
         <meta name="og:title" content="OG via name" />
