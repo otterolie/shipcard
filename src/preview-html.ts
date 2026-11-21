@@ -249,11 +249,14 @@ function imageRow(preview: PlatformPreview, audit: ImageAudit | null): string {
   if (!preview.image.url && !audit) return "";
   const source = preview.image.source ?? "—";
   const dims = audit && audit.width && audit.height ? `${audit.width}x${audit.height}` : "unknown";
-  const badge = preview.image.rendersAsLarge
-    ? '<span class="badge badge-pass">Large</span>'
-    : preview.image.url && preview.image.meetsMinimum
-      ? '<span class="badge badge-warn">Small</span>'
-      : '<span class="badge badge-fail">Unavailable</span>';
+  const badge =
+    audit === null && preview.image.url
+      ? '<span class="badge">Not checked</span>'
+      : preview.image.rendersAsLarge
+        ? '<span class="badge badge-pass">Large</span>'
+        : preview.image.url && preview.image.meetsMinimum
+          ? '<span class="badge badge-warn">Small</span>'
+          : '<span class="badge badge-fail">Unavailable</span>';
 
   return `<div class="detail-row">
     <dt>Image</dt>
@@ -408,7 +411,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .details dt { font-weight: 600; color: var(--muted); }
 .details dd { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 
-.badge { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 3px; line-height: 1.6; }
+.badge { font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 3px; line-height: 1.6; color: var(--muted); background: #f1f5f9; }
 .badge-pass { color: var(--pass); background: var(--pass-bg); }
 .badge-warn { color: var(--warn); background: var(--warn-bg); }
 .badge-fail { color: var(--fail); background: var(--fail-bg); }

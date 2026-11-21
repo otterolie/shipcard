@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import pc from "picocolors";
+import * as ansi from "./ansi.js";
 import {
   audit,
   NoHtmlFilesError,
@@ -191,7 +191,7 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
     try {
       const content = jsonOutput ?? renderTerminal(report, { color: false });
       await fsp.writeFile(path.resolve(opts.output), content, "utf8");
-      if (!opts.json) process.stdout.write(pc.dim(`\nReport written to ${opts.output}\n`));
+      if (!opts.json) process.stdout.write(ansi.dim(`\nReport written to ${opts.output}\n`));
     } catch (err) {
       emitError(
         opts.json,
@@ -209,7 +209,7 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
         renderPreviewHtml(report, { embedLocalImages: opts.embed }),
         "utf8",
       );
-      if (!opts.json) process.stdout.write(pc.dim(`\nPreview written to ${opts.preview}\n`));
+      if (!opts.json) process.stdout.write(ansi.dim(`\nPreview written to ${opts.preview}\n`));
     } catch (err) {
       emitError(
         opts.json,
@@ -223,7 +223,7 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
   if (failBelow !== null && report.summary.score < failBelow) {
     if (!opts.json) {
       process.stdout.write(
-        pc.red(`\nFailed: score ${report.summary.score} is below --fail-below ${failBelow}.\n`),
+        ansi.red(`\nFailed: score ${report.summary.score} is below --fail-below ${failBelow}.\n`),
       );
     }
     return { code: 1, report };
@@ -246,7 +246,7 @@ async function run(target: string, opts: CliOptions): Promise<number> {
     [opts.preview, opts.output].filter((p): p is string => !!p).map((p) => path.resolve(p)),
   );
 
-  process.stderr.write(pc.dim(`[watch] Watching ${target} (Ctrl-C to stop)\n`));
+  process.stderr.write(ansi.dim(`[watch] Watching ${target} (Ctrl-C to stop)\n`));
 
   let timer: NodeJS.Timeout | null = null;
   let running = false;
@@ -260,7 +260,7 @@ async function run(target: string, opts: CliOptions): Promise<number> {
         return;
       }
       running = true;
-      process.stderr.write(pc.dim("[watch] Re-running audit...\n"));
+      process.stderr.write(ansi.dim("[watch] Re-running audit...\n"));
       try {
         await runOnce(target, opts);
       } finally {
@@ -289,10 +289,10 @@ async function run(target: string, opts: CliOptions): Promise<number> {
       watcher = fs.watch(watchRoot, { recursive: true }, onChange);
     } catch {
       watcher = fs.watch(watchRoot, onChange);
-      process.stderr.write(pc.dim("[watch] Recursive watch unavailable; watching top level only\n"));
+      process.stderr.write(ansi.dim("[watch] Recursive watch unavailable; watching top level only\n"));
     }
     watcher.on("error", (err) => {
-      process.stderr.write(pc.red(`[watch] ${err.message}\n`));
+      process.stderr.write(ansi.red(`[watch] ${err.message}\n`));
     });
   } catch (err) {
     emitError(
@@ -319,7 +319,7 @@ async function run(target: string, opts: CliOptions): Promise<number> {
 function parseFailBelow(value: string | undefined): number | null | Error {
   if (value === undefined) return null;
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 0 || n > 100) {
+  if (value.trim() === "" || !Number.isFinite(n) || n < 0 || n > 100) {
     return new Error(`--fail-below must be a number between 0 and 100, got "${value}".`);
   }
   return n;
@@ -328,7 +328,7 @@ function parseFailBelow(value: string | undefined): number | null | Error {
 function parseTimeout(value: string | undefined): number | null | Error {
   if (value === undefined) return null;
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) {
+  if (value.trim() === "" || !Number.isFinite(n) || n <= 0) {
     return new Error(`--timeout must be a positive number in ms, got "${value}".`);
   }
   return n;
@@ -344,8 +344,8 @@ function emitError(json: boolean, code: string, message: string, hint?: string):
     process.stdout.write(JSON.stringify(body, null, 2) + "\n");
     return;
   }
-  process.stderr.write(pc.red(`shipcard: ${message}\n`));
-  if (hint) process.stderr.write(pc.dim(`hint: ${hint}\n`));
+  process.stderr.write(ansi.red(`shipcard: ${message}\n`));
+  if (hint) process.stderr.write(ansi.dim(`hint: ${hint}\n`));
 }
 
 async function main(): Promise<void> {

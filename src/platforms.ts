@@ -214,8 +214,8 @@ const RULES: PlatformRule[] = [
     descLimit: 200,
     imageChain: OG_TW_IMG,
     dims: { minW: 300, minH: 200, largeW: 1200, largeH: 630 },
-    layout: ({ meta, img }) => {
-      if (!img.url) return "inline";
+    layout: ({ meta, img, title, description }) => {
+      if (!img.url) return title.value || description.value ? "inline" : "none";
       const wantsLarge = meta.twitterCard?.toLowerCase() === "summary_large_image";
       return wantsLarge && img.rendersAsLarge ? "large" : "summary";
     },
@@ -243,7 +243,8 @@ const RULES: PlatformRule[] = [
     descLimit: 200,
     imageChain: OG_TW_IMG,
     dims: { minW: 300, minH: 200, largeW: 1200, largeH: 630 },
-    layout: ({ img }) => (img.url ? (img.rendersAsLarge ? "large" : "summary") : "inline"),
+    layout: ({ img, title, description }) =>
+      img.url ? (img.rendersAsLarge ? "large" : "summary") : title.value || description.value ? "inline" : "none",
     extraWarnings: ({ title }) => {
       const w: Warning[] = [];
       if (!title.value) w.push(missing("og:title", "warning"));

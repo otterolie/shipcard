@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { auditHtml } from "./audit-html.js";
 import { buildReport } from "./report.js";
-import type { ImageProbeCache } from "./validate-image.js";
+import { createImageCache, type ImageProbeCache } from "./validate-image.js";
 import { VERSION } from "./version.js";
 import { SKIP_DIR_NAMES } from "./utils.js";
 import type { AuditOptions, AuditReport, PageReport } from "./types.js";
@@ -58,7 +58,7 @@ export async function auditFolder(
     throw new NoHtmlFilesError(folder, hint);
   }
 
-  const imageCache: ImageProbeCache = new Map();
+  const imageCache = createImageCache();
   const pages = await mapWithConcurrency(tasks, PAGE_CONCURRENCY, ({ file, logical, root }) =>
     auditOnePage(file, logical, root, absFolder, options, imageCache),
   );

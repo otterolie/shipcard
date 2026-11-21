@@ -1,4 +1,4 @@
-import * as cheerio from "cheerio";
+import { Parser } from "htmlparser2";
 import type { AuditReport, PageReport } from "./types.js";
 import { escapeHtml, isHttpUrl, isLocalhostUrl } from "./utils.js";
 
@@ -403,9 +403,18 @@ function byImpactDesc(a: Fix, b: Fix): number {
   return order.indexOf(a.category) - order.indexOf(b.category);
 }
 
+type Span = [number, number];
+type Edit = { start: number; end: number; replacement: string };
+type SnippetTarget =
+  | { kind: "title" }
+  | { kind: "meta"; key: string }
+  | { kind: "link"; rel: string }
+  | { kind: "raw" };
+
 /**
- * Apply Fix snippets (or a fixBundle string) into <head>, replacing matching
- * existing tags instead of creating duplicates.
+ * Splice Fix snippets (or a fixBundle string) directly into <head> using
+ * parser character offsets, preserving existing document formatting and
+ * replacing matching tags in place instead of creating duplicates.
  */
 export function applyFixes(originalHtml: string, fixes: Fix[] | string): string {
   if (!fixes || (Array.isArray(fixes) && fixes.length === 0) || fixes === "") {
@@ -416,70 +425,214 @@ export function applyFixes(originalHtml: string, fixes: Fix[] | string): string 
     ? fixes.map((f) => f.snippet).filter((s): s is string => !!s?.trim())
     : fixes.split(/\r?\n/).filter((s) => s.trim().length > 0);
 
-  if (rawSnippets.length === 0) return originalHtml;
-
-  const $ = cheerio.load(originalHtml);
-  if ($("head").length === 0) {
-    $("html").prepend("<head></head>");
-  }
-  const $head = $("head").first();
-
+  // Deduplicate incoming snippets that target the same tag so edits never overlap.
+  const snippets: Array<{ snippet: string; target: SnippetTarget }> = [];
+  const seenTargets = new Set<string>();
   for (const raw of rawSnippets) {
     const snippet = raw.trim();
     if (!snippet || snippet.startsWith("<!--")) continue;
-
-    const $frag = cheerio.load(snippet, null, false);
-    const el = $frag.root().children().first();
-    if (!el.length) continue;
-
-    const tag = el.prop("tagName")?.toLowerCase();
-    if (tag === "title") {
-      const existing = $("title").first();
-      if (existing.length) {
-        existing.replaceWith(snippet);
-      } else {
-        $head.append(`\n  ${snippet}`);
-      }
-      continue;
+    const target = parseSnippetTarget(snippet);
+    const id = targetId(target);
+    if (id) {
+      if (seenTargets.has(id)) continue;
+      seenTargets.add(id);
     }
-
-    if (tag === "meta") {
-      const key = (el.attr("property") || el.attr("name") || "").trim().toLowerCase();
-      if (key) {
-        const match = $("meta").filter((_, node) => {
-          const $n = $(node);
-          const existingKey = ($n.attr("property") || $n.attr("name") || "").trim().toLowerCase();
-          return existingKey === key;
-        });
-        if (match.length) {
-          match.first().replaceWith(snippet);
-          match.slice(1).remove();
-          continue;
-        }
-      }
-      $head.append(`\n  ${snippet}`);
-      continue;
-    }
-
-    if (tag === "link") {
-      const rel = (el.attr("rel") || "").trim().toLowerCase();
-      if (rel) {
-        const match = $("link").filter((_, node) => {
-          const existingRels = ($(node).attr("rel") || "").trim().toLowerCase().split(/\s+/);
-          return existingRels.includes(rel);
-        });
-        if (match.length) {
-          match.first().replaceWith(snippet);
-          match.slice(1).remove();
-          continue;
-        }
-      }
-      $head.append(`\n  ${snippet}`);
-      continue;
-    }
-
-    $head.append(`\n  ${snippet}`);
+    snippets.push({ snippet, target });
   }
 
-  return $.html();
+  if (snippets.length === 0) return originalHtml;
+
+  const index = indexDocument(originalHtml);
+  const edits: Edit[] = [];
+  const toAppend: string[] = [];
+
+  for (const { snippet, target } of snippets) {
+    const spans = lookupSpans(index, target);
+    if (spans.length > 0) {
+      const [first, ...rest] = spans;
+      edits.push({ start: first[0], end: first[1], replacement: snippet });
+      for (const extra of rest) {
+        const [rmStart, rmEnd] = expandLineRemoval(originalHtml, extra[0], extra[1]);
+        edits.push({ start: rmStart, end: rmEnd, replacement: "" });
+      }
+    } else {
+      toAppend.push(snippet);
+    }
+  }
+
+  if (toAppend.length > 0) {
+    const indent = detectHeadIndent(originalHtml, index.headClosePos);
+    const block = toAppend.map((s) => `${indent}${s}`).join("\n");
+
+    if (index.headClosePos !== null) {
+      const before = originalHtml.slice(0, index.headClosePos);
+      const needsLeadingNewline = before.length > 0 && !before.endsWith("\n");
+      const lineStart = before.lastIndexOf("\n") + 1;
+      const headCloseIndent = before.slice(lineStart);
+      const hasOnlySpacesBeforeClose = /^[ \t]*$/.test(headCloseIndent);
+
+      if (hasOnlySpacesBeforeClose && before.includes("\n")) {
+        edits.push({
+          start: lineStart,
+          end: lineStart,
+          replacement: `${block}\n`,
+        });
+      } else {
+        edits.push({
+          start: index.headClosePos,
+          end: index.headClosePos,
+          replacement: `${needsLeadingNewline ? "\n" : ""}${block}\n`,
+        });
+      }
+    } else if (index.htmlOpenEnd !== null) {
+      edits.push({
+        start: index.htmlOpenEnd,
+        end: index.htmlOpenEnd,
+        replacement: `\n<head>\n${block}\n</head>`,
+      });
+    } else {
+      edits.push({
+        start: 0,
+        end: 0,
+        replacement: `<head>\n${block}\n</head>\n`,
+      });
+    }
+  }
+
+  // Apply right-to-left so earlier offsets stay valid.
+  edits.sort((a, b) => b.start - a.start || b.end - a.end);
+  let out = originalHtml;
+  for (const edit of edits) {
+    out = out.slice(0, edit.start) + edit.replacement + out.slice(edit.end);
+  }
+  return out;
+}
+
+function parseSnippetTarget(snippet: string): SnippetTarget {
+  let result: SnippetTarget = { kind: "raw" };
+  let captured = false;
+
+  const parser = new Parser({
+    onopentag(name, attribs) {
+      if (captured) return;
+      captured = true;
+      if (name === "title") {
+        result = { kind: "title" };
+      } else if (name === "meta") {
+        const key = (attribs.property || attribs.name || "").trim().toLowerCase();
+        if (key) result = { kind: "meta", key };
+      } else if (name === "link") {
+        const rel = (attribs.rel || "").trim().toLowerCase().split(/\s+/)[0];
+        if (rel) result = { kind: "link", rel };
+      }
+    },
+  });
+
+  parser.write(snippet);
+  parser.end();
+  return result;
+}
+
+function targetId(target: SnippetTarget): string | null {
+  if (target.kind === "title") return "title";
+  if (target.kind === "meta") return `meta:${target.key}`;
+  if (target.kind === "link") return `link:${target.rel}`;
+  return null;
+}
+
+type DocIndex = {
+  titleSpans: Span[];
+  metaSpans: Map<string, Span[]>;
+  linkSpans: Map<string, Span[]>;
+  headClosePos: number | null;
+  htmlOpenEnd: number | null;
+};
+
+function indexDocument(html: string): DocIndex {
+  const titleSpans: Span[] = [];
+  const metaSpans = new Map<string, Span[]>();
+  const linkSpans = new Map<string, Span[]>();
+  let headClosePos: number | null = null;
+  let htmlOpenEnd: number | null = null;
+
+  let svgDepth = 0;
+  let openTitleStart: number | null = null;
+
+  const parser = new Parser({
+    onopentag(name, attribs) {
+      if (name === "svg") {
+        svgDepth++;
+        return;
+      }
+      if (name === "html" && htmlOpenEnd === null) {
+        htmlOpenEnd = parser.endIndex + 1;
+        return;
+      }
+      if (name === "title" && svgDepth === 0) {
+        openTitleStart = parser.startIndex;
+        return;
+      }
+      if (name === "meta") {
+        const key = (attribs.property || attribs.name || "").trim().toLowerCase();
+        if (!key) return;
+        const span: Span = [parser.startIndex, parser.endIndex + 1];
+        (metaSpans.get(key) ?? metaSpans.set(key, []).get(key)!).push(span);
+        return;
+      }
+      if (name === "link") {
+        const relAttr = (attribs.rel || "").trim().toLowerCase();
+        if (!relAttr) return;
+        const span: Span = [parser.startIndex, parser.endIndex + 1];
+        for (const rel of relAttr.split(/\s+/)) {
+          if (rel) (linkSpans.get(rel) ?? linkSpans.set(rel, []).get(rel)!).push(span);
+        }
+      }
+    },
+    onclosetag(name, isImplied) {
+      if (name === "svg" && svgDepth > 0) {
+        svgDepth--;
+        return;
+      }
+      if (name === "title" && openTitleStart !== null) {
+        titleSpans.push([openTitleStart, parser.endIndex + 1]);
+        openTitleStart = null;
+        return;
+      }
+      if (name === "head" && !isImplied && headClosePos === null) {
+        headClosePos = parser.startIndex;
+      }
+    },
+  });
+
+  parser.write(html);
+  parser.end();
+
+  return { titleSpans, metaSpans, linkSpans, headClosePos, htmlOpenEnd };
+}
+
+function lookupSpans(index: DocIndex, target: SnippetTarget): Span[] {
+  if (target.kind === "title") return index.titleSpans;
+  if (target.kind === "meta") return index.metaSpans.get(target.key) ?? [];
+  if (target.kind === "link") return index.linkSpans.get(target.rel) ?? [];
+  return [];
+}
+
+function expandLineRemoval(html: string, start: number, end: number): Span {
+  let s = start;
+  let e = end;
+  while (s > 0 && (html[s - 1] === " " || html[s - 1] === "\t")) s--;
+  if (s === 0 || html[s - 1] === "\n") {
+    if (html[e] === "\r" && html[e + 1] === "\n") e += 2;
+    else if (html[e] === "\n") e += 1;
+  } else {
+    s = start;
+  }
+  return [s, e];
+}
+
+function detectHeadIndent(html: string, headClosePos: number | null): string {
+  if (headClosePos === null) return "  ";
+  const before = html.slice(0, headClosePos);
+  const match = before.match(/\n([ \t]+)<(?:meta|title|link)\b/i);
+  return match ? match[1] : "  ";
 }

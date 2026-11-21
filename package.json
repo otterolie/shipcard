@@ -53,9 +53,8 @@
     "node": ">=18"
   },
   "dependencies": {
-    "cheerio": "^1.0.0",
-    "image-size": "^2.1.0",
-    "picocolors": "^1.1.1"
+    "htmlparser2": "^10.1.0",
+    "image-size": "^2.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

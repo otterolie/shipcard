@@ -243,6 +243,18 @@ describe("applyFixes", () => {
     expect(meta.canonical).toMatch(/^https:\/\//);
   });
 
+  it("preserves existing HTML formatting, doctype, and comments when applying fixes", () => {
+    const original = `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <!-- keep me -->\n  <title>My Site</title>\n</head>\n<body>\n  <div data-custom='single-quotes'>Hello</div>\n</body>\n</html>\n`;
+    const page = buildPage(original);
+    const fixes = fixesForPage(page);
+    const patched = applyFixes(original, fixes);
+
+    expect(patched).toContain("<!DOCTYPE html>");
+    expect(patched).toContain("<!-- keep me -->");
+    expect(patched).toContain("<div data-custom='single-quotes'>Hello</div>");
+    expect(patched).toContain('<meta property="og:title" content="My Site">');
+  });
+
   it("is a no-op when fixes are empty", () => {
     const html = "<html><head><title>T</title></head></html>";
     expect(applyFixes(html, [])).toBe(html);

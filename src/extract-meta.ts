@@ -1,47 +1,78 @@
-import * as cheerio from "cheerio";
+import { Parser } from "htmlparser2";
 import type { SocialMeta } from "./types.js";
 import { firstNonEmpty } from "./utils.js";
 
 /**
  * Parse social and SEO metadata from an HTML document.
- * Scans the entire document so misnested tags outside <head> are still found.
+ * Scans the full document so misnested tags outside <head> are still found,
+ * while ignoring <title> elements nested inside <svg>.
  */
 export function extractMeta(html: string): SocialMeta {
-  const $ = cheerio.load(html);
-
   const openGraph: Record<string, string[]> = {};
   const twitter: Record<string, string[]> = {};
   const links: Record<string, string[]> = {};
   let metaDescription: string | null = null;
 
-  $("meta").each((_, el) => {
-    const $el = $(el);
-    const key = ($el.attr("property") || $el.attr("name") || "").trim().toLowerCase();
-    const content = $el.attr("content");
-    if (!key || typeof content !== "string") return;
-    const value = content.trim();
-    if (!value) return;
+  let svgDepth = 0;
+  let inTitle = false;
+  let titleDone = false;
+  const titleParts: string[] = [];
 
-    if (key === "description" && metaDescription === null) {
-      metaDescription = value;
-    } else if (key.startsWith("og:")) {
-      (openGraph[key.slice(3)] ||= []).push(value);
-    } else if (key.startsWith("twitter:")) {
-      (twitter[key.slice("twitter:".length)] ||= []).push(value);
-    }
+  const parser = new Parser({
+    onopentag(name, attribs) {
+      if (name === "svg") {
+        svgDepth++;
+        return;
+      }
+
+      if (name === "title" && svgDepth === 0 && !titleDone) {
+        inTitle = true;
+        return;
+      }
+
+      if (name === "meta") {
+        const key = (attribs.property || attribs.name || "").trim().toLowerCase();
+        const content = attribs.content;
+        if (!key || typeof content !== "string") return;
+        const value = content.trim();
+        if (!value) return;
+
+        if (key === "description" && metaDescription === null) {
+          metaDescription = value;
+        } else if (key.startsWith("og:")) {
+          (openGraph[key.slice(3)] ||= []).push(value);
+        } else if (key.startsWith("twitter:")) {
+          (twitter[key.slice("twitter:".length)] ||= []).push(value);
+        }
+        return;
+      }
+
+      if (name === "link") {
+        const relAttr = (attribs.rel || "").trim().toLowerCase();
+        const href = attribs.href?.trim();
+        if (!relAttr || !href) return;
+        for (const rel of relAttr.split(/\s+/)) {
+          if (rel) (links[rel] ||= []).push(href);
+        }
+      }
+    },
+    ontext(text) {
+      if (inTitle) titleParts.push(text);
+    },
+    onclosetag(name) {
+      if (name === "svg" && svgDepth > 0) {
+        svgDepth--;
+      } else if (name === "title" && inTitle) {
+        inTitle = false;
+        titleDone = true;
+      }
+    },
   });
 
-  $("link").each((_, el) => {
-    const $el = $(el);
-    const relAttr = ($el.attr("rel") || "").trim().toLowerCase();
-    const href = $el.attr("href")?.trim();
-    if (!relAttr || !href) return;
-    for (const rel of relAttr.split(/\s+/)) {
-      if (rel) (links[rel] ||= []).push(href);
-    }
-  });
+  parser.write(html);
+  parser.end();
 
-  const titleTag = $("title").first().text().trim() || null;
+  const titleTag = titleParts.join("").trim() || null;
 
   return {
     title: firstNonEmpty(openGraph["title"]?.[0], titleTag),

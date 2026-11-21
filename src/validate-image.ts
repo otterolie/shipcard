@@ -32,7 +32,14 @@ export type ImageProbeResult = {
   errorDetail?: string;
 };
 
-export type ImageProbeCache = Map<string, Promise<ImageProbeResult>>;
+export type ImageProbeCache = {
+  probes: Map<string, Promise<ImageProbeResult>>;
+  elsewhere: Map<string, Promise<string | null>>;
+};
+
+export function createImageCache(): ImageProbeCache {
+  return { probes: new Map(), elsewhere: new Map() };
+}
 
 export type ValidateImageOptions = ResolveContext & {
   timeoutMs?: number;
@@ -126,7 +133,9 @@ export async function validateImage(
     });
     if (options.searchRoot) {
       const pathname = safePathname(resolved);
-      const hint = pathname && (await elsewhereWarning(label, pathname, options.searchRoot, options.baseDir));
+      const hint =
+        pathname &&
+        (await elsewhereWarning(label, pathname, options.searchRoot, options.baseDir, options.cache));
       if (hint) warnings.push(hint);
     }
     return audit;
@@ -174,6 +183,7 @@ export async function validateImage(
           stripQueryAndHash(source),
           options.searchRoot,
           options.baseDir,
+          options.cache,
         );
         if (hint) warnings.push(hint);
       }
@@ -241,11 +251,11 @@ function probeWithCache(
   options: ValidateImageOptions,
 ): Promise<ImageProbeResult> {
   const key = `${external ? "ext" : "local"}:${resolved}`;
-  const cached = options.cache?.get(key);
+  const cached = options.cache?.probes.get(key);
   if (cached) return cached;
 
   const promise = probeImage(resolved, external, options);
-  options.cache?.set(key, promise);
+  options.cache?.probes.set(key, promise);
   return promise;
 }
 
@@ -304,10 +314,18 @@ async function elsewhereWarning(
   relativePath: string,
   searchRoot: string,
   skipDir?: string,
+  cache?: ImageProbeCache,
 ): Promise<Warning | null> {
   const clean = relativePath.replace(/^\/+/, "");
   if (!clean) return null;
-  const found = await findFileElsewhere(searchRoot, clean, skipDir);
+
+  const cacheKey = `${searchRoot}\0${skipDir ?? ""}\0${clean}`;
+  let lookup = cache?.elsewhere.get(cacheKey);
+  if (!lookup) {
+    lookup = findFileElsewhere(searchRoot, clean, skipDir);
+    cache?.elsewhere.set(cacheKey, lookup);
+  }
+  const found = await lookup;
   if (!found) return null;
   const display = "./" + path.relative(searchRoot, found).split(path.sep).join("/");
   return {

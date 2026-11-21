@@ -109,6 +109,13 @@ describe("extractMeta", () => {
     expect(meta.raw.openGraph["title"]).toBeUndefined();
   });
 
+  it("ignores <title> inside inline <svg> elements", () => {
+    const html = `<html><head></head><body><svg><title>Logo Icon</title></svg></body></html>`;
+    const meta = extractMeta(html);
+    expect(meta.title).toBeNull();
+    expect(meta.raw.titleTag).toBeNull();
+  });
+
   it("accepts og:* on name= and twitter:* on property=", () => {
     const html = `
       <html><head>

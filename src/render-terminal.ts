@@ -1,4 +1,4 @@
-import pc from "picocolors";
+import * as ansi from "./ansi.js";
 import type {
   AuditReport,
   CardLayout,
@@ -12,13 +12,12 @@ import { statusFromScore } from "./score.js";
 import { fixesForPage, type Fix } from "./fixes.js";
 
 const SEVERITY_ORDER: Record<Warning["severity"], number> = { error: 0, warning: 1, info: 2 };
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
-const STATUS_PAINT: Record<PageStatus, { icon: string; label: string }> = {
-  pass: { icon: pc.green("✓"), label: pc.green("Pass") },
-  warn: { icon: pc.yellow("⚠"), label: pc.yellow("Warn") },
-  fail: { icon: pc.red("✕"), label: pc.red("Fail") },
-};
+function statusPaint(status: PageStatus): { icon: string; label: string } {
+  if (status === "pass") return { icon: ansi.green("✓"), label: ansi.green("Pass") };
+  if (status === "warn") return { icon: ansi.yellow("⚠"), label: ansi.yellow("Warn") };
+  return { icon: ansi.red("✕"), label: ansi.red("Fail") };
+}
 
 const CARD_LAYOUT_LABELS: Record<CardLayout, string> = {
   large: "Large image card",
@@ -29,23 +28,23 @@ const CARD_LAYOUT_LABELS: Record<CardLayout, string> = {
 
 /** Render an AuditReport for terminal output. Pass `{ color: false }` for plain text files. */
 export function renderTerminal(report: AuditReport, options: { color?: boolean } = {}): string {
-  const lines = [pc.bold(pc.cyan("shipcard")), "", `Target: ${report.target.input}`];
+  const lines = [ansi.bold(ansi.cyan("shipcard")), "", `Target: ${report.target.input}`];
   const output =
     report.target.type === "folder" ? renderFolder(report, lines) : renderSingle(report, lines);
-  return options.color === false ? output.replace(ANSI_RE, "") : output;
+  return options.color === false ? ansi.stripAnsi(output) : output;
 }
 
 function renderFolder(report: AuditReport, lines: string[]): string {
   const overall = statusFromScore(report.summary.score);
   lines.push(`Pages: ${report.summary.pagesScanned}`);
-  lines.push(`Score: ${report.summary.score}/100 (${STATUS_PAINT[overall].label})`);
+  lines.push(`Score: ${report.summary.score}/100 (${statusPaint(overall).label})`);
   lines.push("");
-  lines.push(pc.bold("Pages:"));
+  lines.push(ansi.bold("Pages:"));
 
   const pathWidth = Math.min(44, Math.max(12, ...report.pages.map((p) => p.path.length)));
 
   for (const page of report.pages) {
-    const { icon, label } = STATUS_PAINT[page.status];
+    const { icon, label } = statusPaint(page.status);
     lines.push(`${icon} ${page.path.padEnd(pathWidth)}  ${String(page.score).padEnd(4)}  ${label}`);
   }
 
@@ -54,10 +53,10 @@ function renderFolder(report: AuditReport, lines: string[]): string {
   const sharedKeys = new Set(shared.map((g) => g.key));
 
   if (shared.length > 0) {
-    lines.push("", pc.bold("Shared issues:"));
+    lines.push("", ansi.bold("Shared issues:"));
     for (const g of sortGroups(shared)) {
       lines.push(`  ${severityBullet(g.warning)}${g.paths.length} pages: ${g.warning.message}`);
-      lines.push(pc.dim(`    ${formatPathList(g.paths)}`));
+      lines.push(ansi.dim(`    ${formatPathList(g.paths)}`));
     }
   }
 
@@ -66,9 +65,9 @@ function renderFolder(report: AuditReport, lines: string[]): string {
     const unique = page.warnings.filter((w) => !sharedKeys.has(warningKey(w)));
     if (unique.length === 0 && page.warnings.length > 0) continue;
 
-    lines.push("", pc.bold(page.path));
+    lines.push("", ansi.bold(page.path));
     if (unique.length > 0) {
-      lines.push(pc.dim("Issues:"));
+      lines.push(ansi.dim("Issues:"));
       for (const w of sortWarnings(unique)) {
         lines.push(`  ${severityBullet(w)}${w.message}`);
       }
@@ -82,7 +81,7 @@ function renderFolder(report: AuditReport, lines: string[]): string {
       failingPages.length > 0 &&
       failingPages.every((p) => p.warnings.every((w) => sharedKeys.has(warningKey(w))));
     if (onlyShared) {
-      lines.push("", pc.dim("Fixes for the shared issues above:"));
+      lines.push("", ansi.dim("Fixes for the shared issues above:"));
       appendFixHint(lines, failingPages[0], report);
     }
   }
@@ -93,17 +92,17 @@ function renderFolder(report: AuditReport, lines: string[]): string {
 
 function renderSingle(report: AuditReport, lines: string[]): string {
   const page = report.pages[0];
-  if (!page) return [...lines, pc.red("No page audited."), ""].join("\n");
+  if (!page) return [...lines, ansi.red("No page audited."), ""].join("\n");
 
-  lines.push(`Score: ${page.score}/100 (${STATUS_PAINT[page.status].label})`);
+  lines.push(`Score: ${page.score}/100 (${statusPaint(page.status).label})`);
   lines.push("");
-  lines.push(pc.bold("Checks:"));
+  lines.push(ansi.bold("Checks:"));
   for (const c of page.checks) {
-    const mark = c.passed ? pc.green("✓") : pc.red("✕");
-    lines.push(`  ${mark} ${c.label} ${pc.dim(`(${c.weight})`)}`);
+    const mark = c.passed ? ansi.green("✓") : ansi.red("✕");
+    lines.push(`  ${mark} ${c.label} ${ansi.dim(`(${c.weight})`)}`);
   }
 
-  lines.push("", pc.bold("Metadata:"));
+  lines.push("", ansi.bold("Metadata:"));
   lines.push(formatField("title", page.meta.title));
   lines.push(formatField("description", page.meta.description));
   lines.push(formatField("og:image", page.meta.image));
@@ -113,7 +112,7 @@ function renderSingle(report: AuditReport, lines: string[]): string {
 
   const images = page.images && page.images.length > 0 ? page.images : page.image ? [page.image] : [];
   if (images.length > 0) {
-    lines.push("", pc.bold(images.length > 1 ? "Images:" : "Image:"));
+    lines.push("", ansi.bold(images.length > 1 ? "Images:" : "Image:"));
     for (const img of images) {
       lines.push(`  Source: ${img.resolvedSource}`);
       if (img.width && img.height) {
@@ -125,7 +124,7 @@ function renderSingle(report: AuditReport, lines: string[]): string {
   }
 
   if (page.warnings.length > 0) {
-    lines.push("", pc.bold("Issues:"));
+    lines.push("", ansi.bold("Issues:"));
     for (const w of sortWarnings(page.warnings)) {
       lines.push(`  ${severityBullet(w)}${w.message}`);
     }
@@ -137,7 +136,7 @@ function renderSingle(report: AuditReport, lines: string[]): string {
   }
 
   if (page.platforms.length > 0) {
-    lines.push("", pc.bold("Platforms:"));
+    lines.push("", ansi.bold("Platforms:"));
     for (const line of renderPlatformTable(page.platforms)) lines.push("  " + line);
   }
 
@@ -153,16 +152,16 @@ function renderPlatformTable(platforms: PlatformPreview[]): string[] {
     const errors = p.warnings.filter((w) => w.severity === "error");
     const warns = p.warnings.filter((w) => w.severity === "warning");
     const icon =
-      errors.length > 0 ? pc.red("✕") : warns.length > 0 ? pc.yellow("⚠") : pc.green("✓");
+      errors.length > 0 ? ansi.red("✕") : warns.length > 0 ? ansi.yellow("⚠") : ansi.green("✓");
     const label = p.label.padEnd(labelWidth);
     const layout = CARD_LAYOUT_LABELS[p.cardLayout].padEnd(layoutWidth);
     const truncated = [p.title, p.description].filter((f) => f.truncated).length;
-    const truncatedNote = truncated > 0 ? pc.dim(` (${truncated} truncated)`) : "";
+    const truncatedNote = truncated > 0 ? ansi.dim(` (${truncated} truncated)`) : "";
 
     const reason = errors[0]?.message ?? warns[0]?.message ?? null;
-    const reasonNote = reason ? pc.dim(` - ${truncateText(reason, 85)}`) : "";
+    const reasonNote = reason ? ansi.dim(` - ${truncateText(reason, 85)}`) : "";
 
-    return `${icon} ${label}  ${pc.dim("→")} ${layout}${truncatedNote}${reasonNote}`;
+    return `${icon} ${label}  ${ansi.dim("→")} ${layout}${truncatedNote}${reasonNote}`;
   });
 }
 
@@ -212,13 +211,13 @@ function formatPathList(paths: string[], maxShow = 8): string {
 }
 
 function formatField(label: string, value: string | null): string {
-  return value === null ? `  ${label}: ${pc.dim("(missing)")}` : `  ${label}: ${value}`;
+  return value === null ? `  ${label}: ${ansi.dim("(missing)")}` : `  ${label}: ${value}`;
 }
 
 function severityBullet(w: Warning): string {
-  if (w.severity === "error") return pc.red("• ");
-  if (w.severity === "warning") return pc.yellow("• ");
-  return pc.dim("• ");
+  if (w.severity === "error") return ansi.red("• ");
+  if (w.severity === "warning") return ansi.yellow("• ");
+  return ansi.dim("• ");
 }
 
 function sortWarnings(warnings: Warning[]): Warning[] {
@@ -232,15 +231,15 @@ function appendFixHint(lines: string[], page: PageReport, report: AuditReport): 
   const target = Math.min(100, page.score + points);
   const headline =
     points > 0 ? `Fixes (${page.score} → ${target}, +${points}):` : "Fixes:";
-  lines.push(pc.bold(headline));
+  lines.push(ansi.bold(headline));
   const labelWidth = Math.max(...fixes.map((f) => f.label.length));
   for (const fix of fixes) {
-    const weight = fix.weight > 0 ? pc.cyan(`+${fix.weight}`.padStart(3)) : pc.dim("  ·");
+    const weight = fix.weight > 0 ? ansi.cyan(`+${fix.weight}`.padStart(3)) : ansi.dim("  ·");
     lines.push(`  ${weight}  ${fix.label.padEnd(labelWidth)}  ${snippetPreview(fix)}`);
   }
 }
 
 function snippetPreview(fix: Fix): string {
-  if (!fix.snippet) return pc.dim(truncateText(fix.explain, 70));
-  return pc.dim(truncateText(fix.snippet, 70));
+  if (!fix.snippet) return ansi.dim(truncateText(fix.explain, 70));
+  return ansi.dim(truncateText(fix.snippet, 70));
 }
