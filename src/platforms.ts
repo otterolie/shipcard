@@ -45,7 +45,7 @@ const OG_TW_IMG: ImageSource[] = ["og:image", "twitter:image"];
 const RULES: PlatformRule[] = [
   {
     platform: "meta",
-    label: "Meta (Facebook)",
+    label: "Meta (Facebook / IG)",
     titleChain: OG_TITLE,
     titleLimit: 88,
     descChain: OG_DESC,

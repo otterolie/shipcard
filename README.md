@@ -89,7 +89,7 @@ Multi-page scores are the rounded mean across scanned pages.
 
 Simulates fallback chains, title/description truncation, and image size rules for:
 
-Meta (Facebook), LinkedIn, X (Twitter), Pinterest, Slack, Discord, WhatsApp, Telegram, Bluesky, Mastodon, and iMessage.
+Meta (Facebook / IG), LinkedIn, X (Twitter), Pinterest, Slack, Discord, WhatsApp, Telegram, Bluesky, Mastodon, and iMessage.
 
 Platform quirks to keep in mind:
 
