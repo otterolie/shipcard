@@ -26,26 +26,68 @@ const CARD_LAYOUT_LABELS: Record<CardLayout, string> = {
   none: "Text only",
 };
 
+export type RenderTerminalOptions = {
+  color?: boolean;
+  /** Hide passing pages from the multi-page summary table. */
+  failuresOnly?: boolean;
+};
+
 /** Render an AuditReport for terminal output. Pass `{ color: false }` for plain text files. */
-export function renderTerminal(report: AuditReport, options: { color?: boolean } = {}): string {
+export function renderTerminal(report: AuditReport, options: RenderTerminalOptions = {}): string {
   const lines = [ansi.bold(ansi.cyan("shipcard")), "", `Target: ${report.target.input}`];
-  const output =
-    report.target.type === "folder" ? renderFolder(report, lines) : renderSingle(report, lines);
+  const isMulti = report.target.type === "folder" || report.target.type === "sitemap";
+  const output = isMulti
+    ? renderMulti(report, lines, !!options.failuresOnly)
+    : renderSingle(report, lines);
   return options.color === false ? ansi.stripAnsi(output) : output;
 }
 
-function renderFolder(report: AuditReport, lines: string[]): string {
+function renderMulti(report: AuditReport, lines: string[], failuresOnly: boolean): string {
   const overall = statusFromScore(report.summary.score);
-  lines.push(`Pages: ${report.summary.pagesScanned}`);
-  lines.push(`Score: ${report.summary.score}/100 (${statusPaint(overall).label})`);
+  const tally = [
+    `${report.summary.passed} pass`,
+    `${report.summary.warnings} warn`,
+    `${report.summary.failed} fail`,
+  ];
+  if (report.summary.skipped) tally.push(`${report.summary.skipped} skipped`);
+
+  lines.push(`Pages: ${report.summary.pagesScanned} (${tally.join(", ")})`);
+  if (report.summary.pagesScanned > 0) {
+    lines.push(`Score: ${report.summary.score}/100 (${statusPaint(overall).label})`);
+  }
   lines.push("");
+
+  if (report.pages.length === 0) {
+    lines.push(ansi.dim("No pages audited (all discovered pages were ignored or redirects)."));
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  const visiblePages = failuresOnly
+    ? report.pages.filter((p) => p.status !== "pass")
+    : report.pages;
+
   lines.push(ansi.bold("Pages:"));
+  if (visiblePages.length === 0) {
+    lines.push(ansi.green(`  All ${report.pages.length} pages passed.`));
+  } else {
+    const pathWidth = Math.min(48, Math.max(12, ...visiblePages.map((p) => p.path.length)));
+    for (const page of visiblePages) {
+      const { icon, label } = statusPaint(page.status);
+      lines.push(`${icon} ${page.path.padEnd(pathWidth)}  ${String(page.score).padEnd(4)}  ${label}`);
+    }
+    const hidden = report.pages.length - visiblePages.length;
+    if (hidden > 0) {
+      lines.push(ansi.dim(`  ${hidden} passing page(s) hidden (--failures-only).`));
+    }
+  }
 
-  const pathWidth = Math.min(44, Math.max(12, ...report.pages.map((p) => p.path.length)));
-
-  for (const page of report.pages) {
-    const { icon, label } = statusPaint(page.status);
-    lines.push(`${icon} ${page.path.padEnd(pathWidth)}  ${String(page.score).padEnd(4)}  ${label}`);
+  if (report.siteWarnings && report.siteWarnings.length > 0) {
+    lines.push("", ansi.bold("Site issues:"));
+    for (const w of report.siteWarnings) {
+      lines.push(`  ${severityBullet(w)}${w.message}`);
+      lines.push(ansi.dim(`    ${formatPathList(w.pages)}`));
+    }
   }
 
   const groups = groupWarningSignatures(report.pages);

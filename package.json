@@ -1,6 +1,6 @@
 {
   "name": "@otterolie/shipcard",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Check Open Graph, Twitter, and social link preview tags before you ship. Audits local builds or live URLs with scoring, fix snippets, and HTML previews.",
   "keywords": [
     "open-graph",

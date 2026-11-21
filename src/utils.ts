@@ -6,6 +6,9 @@ import path from "node:path";
 export const RECOMMENDED_IMAGE_WIDTH = 1200;
 export const RECOMMENDED_IMAGE_HEIGHT = 630;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MIN_IMAGE_ASPECT = 1.4;
+export const MAX_IMAGE_ASPECT = 2.3;
+export const LATE_META_BYTES = 50 * 1024;
 
 const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
 
@@ -69,6 +72,73 @@ export async function findFileElsewhere(
   return null;
 }
 
+export function matchesGlob(logicalPath: string, rawPattern: string): boolean {
+  const normPath = "/" + logicalPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const pattern = rawPattern.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!pattern) return false;
+
+  if (!pattern.includes("/")) {
+    const base = path.posix.basename(normPath);
+    return globToRegExp(pattern).test(base);
+  }
+
+  const normPattern = "/" + pattern.replace(/^\/+/, "");
+  return globToRegExp(normPattern).test(normPath);
+}
+
+export function isIgnoredPath(logicalPath: string, patterns?: string[]): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some((p) => matchesGlob(logicalPath, p));
+}
+
+function globToRegExp(glob: string): RegExp {
+  let out = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else {
+        out += "[^/]*";
+      }
+    } else if (ch === "?") {
+      out += "[^/]";
+    } else if (/[.+^${}()|[\]\\]/.test(ch)) {
+      out += "\\" + ch;
+    } else {
+      out += ch;
+    }
+  }
+  out += "$";
+  return new RegExp(out);
+}
+
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  async function run(): Promise<void> {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await worker(items[idx]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => run());
+  await Promise.all(workers);
+  return results;
+}
+
 export function isInsideDir(baseDir: string, candidate: string): boolean {
   const rel = path.relative(path.resolve(baseDir), path.resolve(candidate));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
@@ -86,6 +156,16 @@ export function isHttpUrl(value: string): boolean {
   try {
     const u = new URL(value);
     return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function isSitemapUrl(value: string): boolean {
+  if (!isHttpUrl(value)) return false;
+  try {
+    const pathname = new URL(value).pathname.toLowerCase();
+    return pathname.endsWith(".xml") && pathname.includes("sitemap");
   } catch {
     return false;
   }

@@ -134,6 +134,36 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
     });
   }
 
+  if (hasWarning("og-image-avif")) {
+    fixes.push({
+      id: "fix-og-image-avif",
+      label: "Use PNG, JPEG, or WebP instead of AVIF",
+      weight: 0,
+      explain: "Several social platforms (including X and LinkedIn) do not reliably display AVIF link previews.",
+      category: "image",
+    });
+  }
+
+  if (hasWarning("og-image-aspect-ratio")) {
+    fixes.push({
+      id: "fix-og-image-aspect-ratio",
+      label: "Crop og:image closer to 1.91:1 (1200x630)",
+      weight: 0,
+      explain: "Square, portrait, or ultra-wide images get cropped awkwardly on X, Meta, and LinkedIn cards.",
+      category: "image",
+    });
+  }
+
+  if (hasWarning("meta-too-late")) {
+    fixes.push({
+      id: "fix-meta-too-late",
+      label: "Move social meta tags near the top of <head>",
+      weight: 0,
+      explain: "Crawlers like Slack, WhatsApp, and Discord truncate large HTML responses; place og:* and twitter:* tags before inline styles or scripts.",
+      category: "tag",
+    });
+  }
+
   if (hasWarning("og-image-too-large")) {
     fixes.push({
       id: "fix-og-image-too-large",

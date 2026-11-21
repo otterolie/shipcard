@@ -18,6 +18,7 @@ const TARGET_TYPE_LABELS: Record<AuditReport["target"]["type"], string> = {
   folder: "Folder",
   file: "File",
   stdin: "Stdin",
+  sitemap: "Sitemap",
 };
 
 const STATUS_LABELS: Record<PageStatus, string> = {
@@ -66,10 +67,13 @@ export function renderPreviewHtml(
           <span><strong>${report.summary.passed}</strong> pass</span>
           <span><strong>${report.summary.warnings}</strong> warn</span>
           <span><strong>${report.summary.failed}</strong> fail</span>
+          ${report.summary.skipped ? `<span><strong>${report.summary.skipped}</strong> skipped</span>` : ""}
         </div>
       </div>
     </div>
   </header>
+
+  ${renderSiteWarnings(report)}
 
   <main>
 ${report.pages.map((p, i) => renderPage(p, i + 1, report, !!opts.embedLocalImages)).join("\n")}
@@ -81,6 +85,21 @@ ${report.pages.map((p, i) => renderPage(p, i + 1, report, !!opts.embedLocalImage
 </div>
 </body>
 </html>`;
+}
+
+function renderSiteWarnings(report: AuditReport): string {
+  if (!report.siteWarnings || report.siteWarnings.length === 0) return "";
+  return `<section class="site-warnings">
+    <h2>Site-wide issues</h2>
+    <ul class="issues">
+${report.siteWarnings
+  .map(
+    (w) =>
+      `      <li class="issue issue-${w.severity}">${escapeHtml(w.message)} <span class="muted">(${escapeHtml(w.pages.slice(0, 5).join(", "))}${w.pages.length > 5 ? `, +${w.pages.length - 5} more` : ""})</span></li>`,
+  )
+  .join("\n")}
+    </ul>
+  </section>`;
 }
 
 function renderPage(page: PageReport, index: number, report: AuditReport, embed: boolean): string {
@@ -374,6 +393,10 @@ code { font-family: var(--mono); font-size: 0.9em; }
 .status-fail { color: var(--fail); background: var(--fail-bg); border-color: #fecaca; }
 .tally { margin-top: 6px; display: flex; justify-content: flex-end; gap: 12px; font-size: 12px; color: var(--muted); }
 .tally strong { color: var(--text); }
+
+.site-warnings { margin-bottom: 24px; padding: 12px 14px; border: 1px solid #fde68a; border-radius: 8px; background: var(--warn-bg); }
+.site-warnings h2 { margin: 0 0 6px; font-size: 13px; color: var(--warn); }
+.site-warnings .issues { border-top: none; padding: 0; }
 
 .page { margin-bottom: 36px; }
 .page-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }

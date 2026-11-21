@@ -11,7 +11,9 @@ import {
   isRelativeReference,
   resolveReference,
   stripQueryAndHash,
+  MAX_IMAGE_ASPECT,
   MAX_IMAGE_BYTES,
+  MIN_IMAGE_ASPECT,
   RECOMMENDED_IMAGE_HEIGHT,
   RECOMMENDED_IMAGE_WIDTH,
   type ResolveContext,
@@ -47,6 +49,8 @@ export type ValidateImageOptions = ResolveContext & {
   label?: string;
   offline?: boolean;
   cache?: ImageProbeCache;
+  /** Allow 1:1 square aspect ratios without warning (e.g. twitter:card="summary"). */
+  allowSquare?: boolean;
 };
 
 /** Resolve an og:image / twitter:image reference, load it, and read its dimensions. */
@@ -214,7 +218,8 @@ export async function validateImage(
     });
   }
 
-  if (audit.format === "svg" || audit.contentType === "image/svg+xml") {
+  const isSvg = audit.format === "svg" || audit.contentType === "image/svg+xml";
+  if (isSvg) {
     warnings.push({
       severity: "warning",
       code: "og-image-svg",
@@ -222,16 +227,34 @@ export async function validateImage(
     });
   }
 
-  if (
-    audit.width !== null &&
-    audit.height !== null &&
-    (audit.width < RECOMMENDED_IMAGE_WIDTH || audit.height < RECOMMENDED_IMAGE_HEIGHT)
-  ) {
+  if (audit.format === "avif" || audit.contentType === "image/avif") {
     warnings.push({
       severity: "warning",
-      code: "og-image-too-small",
-      message: `${label} is ${audit.width}x${audit.height}. Recommended: ${RECOMMENDED_IMAGE_WIDTH}x${RECOMMENDED_IMAGE_HEIGHT}.`,
+      code: "og-image-avif",
+      message: `${label} is AVIF. Several social platforms (including X and LinkedIn) do not reliably render AVIF previews; use PNG, JPEG, or WebP.`,
     });
+  }
+
+  if (audit.width !== null && audit.height !== null) {
+    if (audit.width < RECOMMENDED_IMAGE_WIDTH || audit.height < RECOMMENDED_IMAGE_HEIGHT) {
+      warnings.push({
+        severity: "warning",
+        code: "og-image-too-small",
+        message: `${label} is ${audit.width}x${audit.height}. Recommended: ${RECOMMENDED_IMAGE_WIDTH}x${RECOMMENDED_IMAGE_HEIGHT}.`,
+      });
+    }
+
+    if (!isSvg && audit.height > 0) {
+      const ratio = audit.width / audit.height;
+      const minAspect = options.allowSquare ? 0.8 : MIN_IMAGE_ASPECT;
+      if (ratio < minAspect || ratio > MAX_IMAGE_ASPECT) {
+        warnings.push({
+          severity: "warning",
+          code: "og-image-aspect-ratio",
+          message: `${label} aspect ratio is ${ratio.toFixed(2)}:1 (${audit.width}x${audit.height}). Most platforms crop to ~1.91:1 (1200x630).`,
+        });
+      }
+    }
   }
 
   if (audit.sizeBytes !== null && audit.sizeBytes > MAX_IMAGE_BYTES) {

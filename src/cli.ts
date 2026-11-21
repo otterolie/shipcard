@@ -14,7 +14,7 @@ import {
 } from "./index.js";
 
 const DEFAULT_PREVIEW_PATH = "shipcard-preview.html";
-const VALUE_FLAGS = new Set(["--fail-below", "--timeout", "--output"]);
+const VALUE_FLAGS = new Set(["--fail-below", "--timeout", "--output", "--ignore", "--max-pages"]);
 
 type CliOptions = {
   json: boolean;
@@ -26,6 +26,11 @@ type CliOptions = {
   output?: string;
   watch: boolean;
   embed: boolean;
+  ignore: string[];
+  includeRedirects: boolean;
+  failuresOnly: boolean;
+  sitemap: boolean;
+  maxPages?: string;
 };
 
 const HELP = `shipcard ${VERSION}
@@ -35,7 +40,7 @@ Check Open Graph, Twitter, and social link preview tags before you ship.
 Usage:
   shipcard <target> [options]
 
-  target  URL, build folder, .html file, or - for stdin
+  target  URL, sitemap.xml URL, build folder, .html file, or - for stdin
 
 Options:
   --json                 print JSON report
@@ -43,6 +48,11 @@ Options:
   --timeout <ms>         network timeout in milliseconds
   --no-images            skip image validation
   --offline              check local files only; never fetch remote images
+  --ignore <pattern>     skip matching paths or basenames (repeatable)
+  --include-redirects    include meta-refresh redirect stub pages
+  --failures-only        hide passing pages in multi-page terminal output
+  --sitemap              treat URL target as an XML sitemap
+  --max-pages <n>        max pages to audit from a sitemap (default: 50)
   --preview [file]       write HTML card previews (default: ${DEFAULT_PREVIEW_PATH})
   --embed                with --preview, inline local images as data URIs
   --output <file>        write the report to a file
@@ -51,8 +61,8 @@ Options:
   -V, --version          show version
 
 Examples:
-  shipcard ./dist --offline
-  shipcard http://localhost:3000
+  shipcard ./dist --offline --ignore 404.html
+  shipcard https://example.com/sitemap.xml --failures-only
   shipcard ./dist --preview cards.html --embed
 `;
 
@@ -111,6 +121,11 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
       output: { type: "string" },
       watch: { type: "boolean", default: false },
       embed: { type: "boolean", default: false },
+      ignore: { type: "string", multiple: true, default: [] },
+      "include-redirects": { type: "boolean", default: false },
+      "failures-only": { type: "boolean", default: false },
+      sitemap: { type: "boolean", default: false },
+      "max-pages": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
       version: { type: "boolean", short: "V", default: false },
     },
@@ -121,7 +136,7 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
 
   const target = positionals[0];
   if (!target) {
-    throw new Error("Missing target. Pass a URL, folder, .html file, or - for stdin.");
+    throw new Error("Missing target. Pass a URL, sitemap, folder, .html file, or - for stdin.");
   }
   if (positionals.length > 1) {
     throw new Error(`Unexpected arguments: ${positionals.slice(1).join(" ")}`);
@@ -139,6 +154,11 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
       output: values.output as string | undefined,
       watch: !!values.watch,
       embed: !!values.embed,
+      ignore: (values.ignore as string[]) ?? [],
+      includeRedirects: !!values["include-redirects"],
+      failuresOnly: !!values["failures-only"],
+      sitemap: !!values.sitemap,
+      maxPages: values["max-pages"] as string | undefined,
     },
   };
 }
@@ -150,9 +170,15 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
     return { code: 1 };
   }
 
-  const timeoutMs = parseTimeout(opts.timeout);
+  const timeoutMs = parsePositiveInt(opts.timeout, "--timeout");
   if (timeoutMs instanceof Error) {
     emitError(opts.json, "bad-flag", timeoutMs.message);
+    return { code: 1 };
+  }
+
+  const maxPages = parsePositiveInt(opts.maxPages, "--max-pages");
+  if (maxPages instanceof Error) {
+    emitError(opts.json, "bad-flag", maxPages.message);
     return { code: 1 };
   }
 
@@ -163,6 +189,10 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
       timeoutMs: timeoutMs ?? undefined,
       validateImages: opts.images,
       offline: opts.offline,
+      ignore: opts.ignore.length > 0 ? opts.ignore : undefined,
+      includeRedirects: opts.includeRedirects,
+      sitemap: opts.sitemap,
+      maxPages: maxPages ?? undefined,
     });
   } catch (err) {
     if (err instanceof NoHtmlFilesError) {
@@ -185,11 +215,12 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
   }
 
   const jsonOutput = opts.json ? JSON.stringify(report, null, 2) + "\n" : null;
-  process.stdout.write(jsonOutput ?? renderTerminal(report));
+  process.stdout.write(jsonOutput ?? renderTerminal(report, { failuresOnly: opts.failuresOnly }));
 
   if (opts.output) {
     try {
-      const content = jsonOutput ?? renderTerminal(report, { color: false });
+      const content =
+        jsonOutput ?? renderTerminal(report, { color: false, failuresOnly: opts.failuresOnly });
       await fsp.writeFile(path.resolve(opts.output), content, "utf8");
       if (!opts.json) process.stdout.write(ansi.dim(`\nReport written to ${opts.output}\n`));
     } catch (err) {
@@ -325,11 +356,11 @@ function parseFailBelow(value: string | undefined): number | null | Error {
   return n;
 }
 
-function parseTimeout(value: string | undefined): number | null | Error {
+function parsePositiveInt(value: string | undefined, flag: string): number | null | Error {
   if (value === undefined) return null;
   const n = Number(value);
-  if (value.trim() === "" || !Number.isFinite(n) || n <= 0) {
-    return new Error(`--timeout must be a positive number in ms, got "${value}".`);
+  if (value.trim() === "" || !Number.isInteger(n) || n <= 0) {
+    return new Error(`${flag} must be a positive integer, got "${value}".`);
   }
   return n;
 }

@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { auditHtml } from "./audit-html.js";
+import { extractMetaWithStats } from "./extract-meta.js";
 import { buildReport } from "./report.js";
 import { createImageCache, type ImageProbeCache } from "./validate-image.js";
 import { VERSION } from "./version.js";
-import { SKIP_DIR_NAMES } from "./utils.js";
-import type { AuditOptions, AuditReport, PageReport } from "./types.js";
+import { isIgnoredPath, mapWithConcurrency, SKIP_DIR_NAMES } from "./utils.js";
+import type { AuditOptions, AuditReport, PageReport, SkippedPage } from "./types.js";
 
 const BUILD_DIR_NAMES = ["dist", "out", "build", "public", ".output", "export"];
 const BUILD_DIR_SET = new Set(BUILD_DIR_NAMES);
@@ -21,7 +22,8 @@ export class NoHtmlFilesError extends Error {
 
 /**
  * Scan a folder for .html files and audit each one.
- * Auto-detects standard build directories and split client/server outputs.
+ * Auto-detects standard build directories and split client/server outputs,
+ * supports --ignore globs, and skips <meta http-equiv="refresh"> redirect stubs by default.
  */
 export async function auditFolder(
   folder: string,
@@ -40,7 +42,9 @@ export async function auditFolder(
   }
 
   const tasks: Array<{ file: string; logical: string; root: string }> = [];
+  const skipped: SkippedPage[] = [];
   const seen = new Set<string>();
+  let discoveredAny = false;
 
   for (const root of roots) {
     const files = await listHtmlFiles(root);
@@ -49,26 +53,44 @@ export async function auditFolder(
       const logical = "/" + path.relative(absFolder, full).split(path.sep).join("/");
       if (seen.has(logical)) continue;
       seen.add(logical);
+      discoveredAny = true;
+
+      if (isIgnoredPath(logical, options.ignore)) {
+        skipped.push({ path: logical, reason: "ignored" });
+        continue;
+      }
+
       tasks.push({ file: full, logical, root });
     }
   }
 
-  if (tasks.length === 0) {
+  if (!discoveredAny) {
     const hint = await missingHtmlHint(absFolder);
     throw new NoHtmlFilesError(folder, hint);
   }
 
   const imageCache = createImageCache();
-  const pages = await mapWithConcurrency(tasks, PAGE_CONCURRENCY, ({ file, logical, root }) =>
+  const outcomes = await mapWithConcurrency(tasks, PAGE_CONCURRENCY, ({ file, logical, root }) =>
     auditOnePage(file, logical, root, absFolder, options, imageCache),
   );
 
+  const pages: PageReport[] = [];
+  for (const outcome of outcomes) {
+    if ("skipped" in outcome) {
+      skipped.push(outcome.skipped);
+    } else {
+      pages.push(outcome.page);
+    }
+  }
+
   pages.sort((a, b) => a.path.localeCompare(b.path));
+  skipped.sort((a, b) => a.path.localeCompare(b.path));
 
   return buildReport(pages, {
     version: options.version ?? VERSION,
     type: "folder",
     input: folder,
+    skipped,
   });
 }
 
@@ -171,26 +193,6 @@ async function listHtmlFiles(absFolder: string): Promise<string[]> {
   return files.sort();
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-
-  async function run(): Promise<void> {
-    while (next < items.length) {
-      const idx = next++;
-      results[idx] = await worker(items[idx]);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(limit, items.length) }, () => run());
-  await Promise.all(workers);
-  return results;
-}
-
 async function auditOnePage(
   file: string,
   logicalPath: string,
@@ -198,10 +200,13 @@ async function auditOnePage(
   searchRoot: string,
   options: AuditOptions,
   imageCache: ImageProbeCache,
-): Promise<PageReport> {
+): Promise<{ page: PageReport } | { skipped: SkippedPage }> {
   try {
     const html = await fs.readFile(file, "utf8");
-    return await auditHtml(html, {
+    if (!options.includeRedirects && extractMetaWithStats(html).isRedirect) {
+      return { skipped: { path: logicalPath, reason: "redirect" } };
+    }
+    const page = await auditHtml(html, {
       source: file,
       path: logicalPath,
       sourceFile: file,
@@ -212,13 +217,14 @@ async function auditOnePage(
       offline: options.offline,
       imageCache,
     });
+    return { page };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return failedPage(logicalPath, file, message);
+    return { page: failedPage(logicalPath, file, message) };
   }
 }
 
-function failedPage(logicalPath: string, source: string, reason: string): PageReport {
+export function failedPage(logicalPath: string, source: string, reason: string): PageReport {
   return {
     path: logicalPath,
     source,

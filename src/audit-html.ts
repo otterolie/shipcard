@@ -1,9 +1,14 @@
 import type { AuditOptions, ImageAudit, PageReport, SocialMeta, Warning } from "./types.js";
-import { extractMeta } from "./extract-meta.js";
+import { extractMetaWithStats } from "./extract-meta.js";
 import { findDuplicateCoreTags, scorePage, statusFromScore } from "./score.js";
 import { validateImage, type ImageProbeCache } from "./validate-image.js";
 import { platformPreviews } from "./platforms.js";
-import { isLocalhostUrl, isRelativeOrPathOnly } from "./utils.js";
+import {
+  formatBytes,
+  isLocalhostUrl,
+  isRelativeOrPathOnly,
+  LATE_META_BYTES,
+} from "./utils.js";
 
 export type AuditHtmlOptions = AuditOptions & {
   source: string;
@@ -12,12 +17,21 @@ export type AuditHtmlOptions = AuditOptions & {
   sourceUrl?: string;
   searchRoot?: string;
   imageCache?: ImageProbeCache;
+  fetchImpl?: typeof fetch;
 };
 
 /** Audit a single HTML document and produce a scored PageReport. */
 export async function auditHtml(html: string, options: AuditHtmlOptions): Promise<PageReport> {
-  const meta = extractMeta(html);
+  const { meta, lastSocialTagByte } = extractMetaWithStats(html);
   const warnings = collectMetaWarnings(meta);
+
+  if (lastSocialTagByte > LATE_META_BYTES) {
+    warnings.push({
+      severity: "warning",
+      code: "meta-too-late",
+      message: `Social meta tags appear at ${formatBytes(lastSocialTagByte)} into the HTML. Crawlers like Slack, WhatsApp, and Discord may truncate responses past 50-256 KB; place social tags near the top of <head>.`,
+    });
+  }
 
   const resolveOpts = {
     baseUrl: options.baseUrl,
@@ -28,6 +42,7 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
     timeoutMs: options.timeoutMs,
     offline: options.offline,
     cache: options.imageCache,
+    fetchImpl: options.fetchImpl,
   };
 
   let images: ImageAudit[] = [];
@@ -35,8 +50,15 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
 
   if (options.validateImages !== false) {
     const sources = collectImageSources(meta);
+    const isSummaryTwitterCard = meta.twitterCard?.toLowerCase() === "summary";
     images = await Promise.all(
-      sources.map(({ url, label }) => validateImage(url, { ...resolveOpts, label })),
+      sources.map(({ url, label }) =>
+        validateImage(url, {
+          ...resolveOpts,
+          label,
+          allowSquare: label === "twitter:image" && isSummaryTwitterCard,
+        }),
+      ),
     );
     image = images[0] ?? null;
     for (const img of images) {

@@ -1,6 +1,6 @@
 # shipcard
 
-Checks your Open Graph, Twitter, and social link preview tags before you ship. Point it at a build folder (`./dist`), a single `.html` file, stdin (`-`), or a live URL (`http://localhost:3000`).
+Checks your Open Graph, Twitter, and social link preview tags before you ship. Point it at a build folder (`./dist`), a single `.html` file, stdin (`-`), a live URL, or an XML sitemap.
 
 ```bash
 npx @otterolie/shipcard ./dist
@@ -19,10 +19,13 @@ npm i -D @otterolie/shipcard
 npx @otterolie/shipcard ./dist
 
 # Pre-launch check: resolve image paths on disk, skip remote fetches
-npx @otterolie/shipcard ./dist --offline
+npx @otterolie/shipcard ./dist --offline --ignore 404.html
 
 # Audit a running dev server or deployed page
 npx @otterolie/shipcard http://localhost:3000
+
+# Audit a deployed site from its sitemap
+npx @otterolie/shipcard https://example.com/sitemap.xml --failures-only
 
 # Audit a single HTML file or stdin
 npx @otterolie/shipcard ./dist/index.html
@@ -53,12 +56,13 @@ For each page, shipcard extracts `<title>`, `<meta name="description">`, `og:*`,
 - Missing `og:title`, `og:description`, `og:image`, `twitter:card`, or canonical tags
 - Localhost or relative `og:url`, `canonical`, and `og:image` URLs
 - Plain `http://` image URLs
-- Missing, undecodable, SVG, data-URI, undersized (`< 1200x630`), or oversized (`> 5 MB`) images
+- Missing, undecodable, SVG, AVIF, data-URI, undersized (`< 1200x630`), off-aspect-ratio (outside `1.4:1–2.3:1`), or oversized (`> 5 MB`) images
 - Mismatches between declared `og:image:width`/`height` and actual image dimensions
 - Missing images that exist under another subfolder (common when scanning the wrong build directory)
-- Duplicate core meta tags
+- Social meta tags appearing late in the HTML (`> 50 KB` into the document, past common crawler byte limits)
+- Duplicate core meta tags on a page, and identical titles or descriptions shared across multiple pages
 
-Folder scans auto-detect standard build directories (`dist`, `out`, `build`, `public`, `.output`, `export`) when run from a repo root, and auto-descend into split client/server output directories (`client`, `public`, `static`, `www`) used by Astro, Next.js standalone, Nuxt, and SvelteKit. Multi-page reports group identical issues across pages.
+Folder scans auto-detect standard build directories (`dist`, `out`, `build`, `public`, `.output`, `export`) when run from a repo root, auto-descend into split client/server output directories (`client`, `public`, `static`, `www`), skip `<meta http-equiv="refresh">` redirect stubs by default, and group identical issues across pages.
 
 ## Scoring
 
@@ -79,7 +83,7 @@ Folder scans auto-detect standard build directories (`dist`, `out`, `build`, `pu
 - `70-89`: Warn
 - `0-69`: Fail
 
-Folder scores are the rounded mean across scanned pages.
+Multi-page scores are the rounded mean across scanned pages.
 
 ## Platforms
 
@@ -104,6 +108,11 @@ Platform quirks to keep in mind:
 | `--timeout <ms>` | Network fetch timeout in milliseconds |
 | `--no-images` | Skip image loading and dimension checks |
 | `--offline` | Only check local files and local path mappings; never fetch remote images |
+| `--ignore <pattern>` | Skip matching paths or basenames (repeatable, e.g. `--ignore 404.html --ignore "/admin/**"`) |
+| `--include-redirects` | Include `<meta http-equiv="refresh">` redirect stubs in multi-page audits |
+| `--failures-only` | Hide passing pages in multi-page terminal output |
+| `--sitemap` | Treat a URL target as an XML sitemap even if it does not end in `.xml` |
+| `--max-pages <n>` | Maximum pages to audit from a sitemap (default: `50`) |
 | `--preview [file]` | Write an HTML preview report (default: `shipcard-preview.html`) |
 | `--embed` | With `--preview`, inline local images as `data:` URIs |
 | `--output <file>` | Write the report (JSON or plain text) to a file |
@@ -123,8 +132,11 @@ import {
   renderPreviewHtml,
 } from "@otterolie/shipcard";
 
-const report = await audit("./dist", { offline: true });
-console.log(renderTerminal(report));
+const report = await audit("./dist", {
+  offline: true,
+  ignore: ["404.html", "/admin/**"],
+});
+console.log(renderTerminal(report, { failuresOnly: true }));
 
 const page = report.pages[0];
 const fixes = fixesForPage(page, report);
@@ -132,7 +144,7 @@ const html = await fs.readFile("dist/index.html", "utf8");
 await fs.writeFile("dist/index.html", applyFixes(html, fixes));
 ```
 
-Also exported: `auditHtml`, `auditUrl`, `auditFolder`, `extractMeta`, `scorePage`, `statusFromScore`, `validateImage`, `platformPreviews`, `fixBundle`, `summarize`, `NoHtmlFilesError`, `version`, and TypeScript report types.
+Also exported: `auditHtml`, `auditUrl`, `auditFolder`, `auditSitemap`, `parseSitemapXml`, `extractMeta`, `extractMetaWithStats`, `scorePage`, `statusFromScore`, `validateImage`, `platformPreviews`, `fixBundle`, `summarize`, `NoHtmlFilesError`, `version`, and TypeScript report types.
 
 ## Limits
 

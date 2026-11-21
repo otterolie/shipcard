@@ -6,6 +6,15 @@ export type Warning = {
   message: string;
 };
 
+export type SiteWarning = Warning & {
+  pages: string[];
+};
+
+export type SkippedPage = {
+  path: string;
+  reason: "ignored" | "redirect";
+};
+
 export type SocialMeta = {
   title: string | null;
   description: string | null;
@@ -105,7 +114,7 @@ export type PageReport = {
   platforms: PlatformPreview[];
 };
 
-export type TargetType = "url" | "folder" | "file" | "stdin";
+export type TargetType = "url" | "folder" | "file" | "stdin" | "sitemap";
 
 export type AuditReport = {
   tool: "shipcard";
@@ -121,8 +130,11 @@ export type AuditReport = {
     passed: number;
     warnings: number;
     failed: number;
+    skipped?: number;
   };
   pages: PageReport[];
+  siteWarnings?: SiteWarning[];
+  skipped?: SkippedPage[];
 };
 
 export type AuditOptions = {
@@ -132,4 +144,12 @@ export type AuditOptions = {
   offline?: boolean;
   timeoutMs?: number;
   version?: string;
+  /** Glob patterns of logical paths or basenames to skip (e.g. "404.html", "/admin/**"). */
+  ignore?: string[];
+  /** Include <meta http-equiv="refresh"> redirect stub pages in multi-page audits. Default false. */
+  includeRedirects?: boolean;
+  /** Treat a URL target as an XML sitemap even if the URL does not end in .xml. */
+  sitemap?: boolean;
+  /** Maximum pages to fetch when auditing a sitemap (default 50). */
+  maxPages?: number;
 };
