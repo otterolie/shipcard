@@ -1,6 +1,11 @@
 import type { AuditOptions, ImageAudit, PageReport, SocialMeta, Warning } from "./types.js";
 import { extractMetaWithStats } from "./extract-meta.js";
-import { findDuplicateCoreTags, scorePage, statusFromScore } from "./score.js";
+import {
+  findDuplicateCoreTags,
+  isValidTwitterCard,
+  pageStatus,
+  scorePage,
+} from "./score.js";
 import { validateImage, type ImageProbeCache } from "./validate-image.js";
 import { platformPreviews } from "./platforms.js";
 import {
@@ -89,14 +94,16 @@ export async function auditHtml(html: string, options: AuditHtmlOptions): Promis
   checkUrlWarning(meta.url, "og:url", "og-url", warnings);
   checkUrlWarning(meta.canonical, "canonical", "canonical", warnings);
 
-  const { score, checks } = scorePage(meta, image);
+  const { score, checks } = scorePage(meta, image, {
+    imagesSkipped: options.validateImages === false,
+  });
   const platforms = platformPreviews(meta, image, options.validateImages === false ? undefined : images);
 
   return {
     path: options.path,
     source: options.source,
     score,
-    status: statusFromScore(score),
+    status: pageStatus(score, warnings),
     meta,
     image,
     images,
@@ -160,7 +167,15 @@ function collectMetaWarnings(meta: SocialMeta): Warning[] {
   if (!og["title"]?.[0]) w.push(missing("warning", "missing-og-title", "og:title"));
   if (!og["description"]?.[0]) w.push(missing("warning", "missing-og-description", "og:description"));
   if (!hasOgImage) w.push(missing("error", "missing-og-image", "og:image"));
-  if (!meta.twitterCard) w.push(missing("warning", "missing-twitter-card", "twitter:card"));
+  if (!meta.twitterCard) {
+    w.push(missing("warning", "missing-twitter-card", "twitter:card"));
+  } else if (!isValidTwitterCard(meta.twitterCard)) {
+    w.push({
+      severity: "warning",
+      code: "invalid-twitter-card",
+      message: `twitter:card="${meta.twitterCard}" is not valid (use "summary_large_image", "summary", "app", or "player").`,
+    });
+  }
   if (!meta.canonical) w.push(missing("info", "missing-canonical", "canonical link"));
 
   if (hasOgImage && !og["image:alt"]?.[0]) {

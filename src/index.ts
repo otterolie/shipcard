@@ -2,8 +2,11 @@ export { extractMeta, extractMetaWithStats, type MetaExtraction } from "./extrac
 export {
   scorePage,
   statusFromScore,
+  pageStatus,
+  isValidTwitterCard,
   hasDuplicateCoreTags,
   findDuplicateCoreTags,
+  type ScoreOptions,
 } from "./score.js";
 export { validateImage } from "./validate-image.js";
 export { auditHtml } from "./audit-html.js";
@@ -21,6 +24,7 @@ export type {
   AuditReport,
   CardLayout,
   CheckResult,
+  CheckStatus,
   ImageAudit,
   PageReport,
   PageStatus,

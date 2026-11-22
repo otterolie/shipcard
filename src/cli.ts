@@ -14,11 +14,19 @@ import {
 } from "./index.js";
 
 const DEFAULT_PREVIEW_PATH = "shipcard-preview.html";
-const VALUE_FLAGS = new Set(["--fail-below", "--timeout", "--output", "--ignore", "--max-pages"]);
+const VALUE_FLAGS = new Set([
+  "--fail-below",
+  "--fail-on",
+  "--timeout",
+  "--output",
+  "--ignore",
+  "--max-pages",
+]);
 
 type CliOptions = {
   json: boolean;
   failBelow?: string;
+  failOn?: string;
   timeout?: string;
   images: boolean;
   offline: boolean;
@@ -44,7 +52,8 @@ Usage:
 
 Options:
   --json                 print JSON report
-  --fail-below <n>       exit 1 if score < n (0-100)
+  --fail-below <n>       exit 1 if overall score < n (0-100)
+  --fail-on <warn|fail>  exit 1 if any page has status warn or fail
   --timeout <ms>         network timeout in milliseconds
   --no-images            skip image validation
   --offline              check local files only; never fetch remote images
@@ -62,8 +71,8 @@ Options:
 
 Examples:
   shipcard ./dist --offline --ignore 404.html
+  shipcard ./dist --offline --fail-on fail
   shipcard https://example.com/sitemap.xml --failures-only
-  shipcard ./dist --preview cards.html --embed
 `;
 
 function normalizePreviewArg(argv: string[]): string[] {
@@ -114,6 +123,7 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
     options: {
       json: { type: "boolean", default: false },
       "fail-below": { type: "string" },
+      "fail-on": { type: "string" },
       timeout: { type: "string" },
       "no-images": { type: "boolean", default: false },
       offline: { type: "boolean", default: false },
@@ -147,6 +157,7 @@ function parseCli(argv: string[]): { target: string; opts: CliOptions } | "help"
     opts: {
       json: !!values.json,
       failBelow: values["fail-below"] as string | undefined,
+      failOn: values["fail-on"] as string | undefined,
       timeout: values.timeout as string | undefined,
       images: !values["no-images"],
       offline: !!values.offline,
@@ -167,6 +178,12 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
   const failBelow = parseFailBelow(opts.failBelow);
   if (failBelow instanceof Error) {
     emitError(opts.json, "bad-flag", failBelow.message);
+    return { code: 1 };
+  }
+
+  const failOn = parseFailOn(opts.failOn);
+  if (failOn instanceof Error) {
+    emitError(opts.json, "bad-flag", failOn.message);
     return { code: 1 };
   }
 
@@ -255,6 +272,26 @@ async function runOnce(target: string, opts: CliOptions): Promise<{ code: number
     if (!opts.json) {
       process.stdout.write(
         ansi.red(`\nFailed: score ${report.summary.score} is below --fail-below ${failBelow}.\n`),
+      );
+    }
+    return { code: 1, report };
+  }
+
+  if (failOn === "fail" && report.summary.failed > 0) {
+    if (!opts.json) {
+      process.stdout.write(
+        ansi.red(`\nFailed: ${report.summary.failed} page(s) failed (--fail-on fail).\n`),
+      );
+    }
+    return { code: 1, report };
+  }
+
+  if (failOn === "warn" && (report.summary.failed > 0 || report.summary.warnings > 0)) {
+    if (!opts.json) {
+      process.stdout.write(
+        ansi.red(
+          `\nFailed: ${report.summary.failed} failed, ${report.summary.warnings} warning (--fail-on warn).\n`,
+        ),
       );
     }
     return { code: 1, report };
@@ -354,6 +391,13 @@ function parseFailBelow(value: string | undefined): number | null | Error {
     return new Error(`--fail-below must be a number between 0 and 100, got "${value}".`);
   }
   return n;
+}
+
+function parseFailOn(value: string | undefined): "warn" | "fail" | null | Error {
+  if (value === undefined) return null;
+  const norm = value.trim().toLowerCase();
+  if (norm === "warn" || norm === "fail") return norm;
+  return new Error(`--fail-on must be "warn" or "fail", got "${value}".`);
 }
 
 function parsePositiveInt(value: string | undefined, flag: string): number | null | Error {

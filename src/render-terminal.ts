@@ -53,7 +53,11 @@ function renderMulti(report: AuditReport, lines: string[], failuresOnly: boolean
 
   lines.push(`Pages: ${report.summary.pagesScanned} (${tally.join(", ")})`);
   if (report.summary.pagesScanned > 0) {
-    lines.push(`Score: ${report.summary.score}/100 (${statusPaint(overall).label})`);
+    const minNote =
+      report.summary.pagesScanned >= 2 && report.summary.minScore !== report.summary.score
+        ? ansi.dim(` (min ${report.summary.minScore})`)
+        : "";
+    lines.push(`Score: ${report.summary.score}/100${minNote} (${statusPaint(overall).label})`);
   }
   lines.push("");
 
@@ -140,8 +144,21 @@ function renderSingle(report: AuditReport, lines: string[]): string {
   lines.push("");
   lines.push(ansi.bold("Checks:"));
   for (const c of page.checks) {
-    const mark = c.passed ? ansi.green("✓") : ansi.red("✕");
-    lines.push(`  ${mark} ${c.label} ${ansi.dim(`(${c.weight})`)}`);
+    const mark =
+      c.status === "pass"
+        ? ansi.green("✓")
+        : c.status === "partial"
+          ? ansi.yellow("◐")
+          : c.status === "skipped"
+            ? ansi.dim("–")
+            : ansi.red("✕");
+    const pts =
+      c.status === "skipped"
+        ? ansi.dim("(skipped)")
+        : c.status === "partial"
+          ? ansi.dim(`(${c.earned}/${c.weight})`)
+          : ansi.dim(`(${c.weight})`);
+    lines.push(`  ${mark} ${c.label} ${pts}`);
   }
 
   lines.push("", ansi.bold("Metadata:"));

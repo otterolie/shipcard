@@ -25,11 +25,17 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
 
   const fixes: Fix[] = [];
   const checkIds = new Set<string>();
+  let productionUrlsWeight = 0;
 
   for (const check of page.checks) {
-    if (check.passed) continue;
+    if (check.passed || check.status === "skipped") continue;
     checkIds.add(check.id);
-    const fix = checkToFix(check.id, check.weight, {
+    const missingPoints = Math.max(0, check.weight - check.earned);
+    if (check.id === "production-urls") {
+      productionUrlsWeight = missingPoints;
+      continue;
+    }
+    const fix = checkToFix(check.id, missingPoints, {
       host,
       pageUrl,
       suggestedImage,
@@ -42,8 +48,10 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
 
   const hasWarning = (...codes: string[]) => page.warnings.some((w) => codes.includes(w.code));
 
+  const urlFixes: Fix[] = [];
+
   if (hasWarning("og-url-localhost", "og-url-relative")) {
-    fixes.push({
+    urlFixes.push({
       id: "fix-og-url-localhost",
       label: "Point og:url at production",
       weight: 0,
@@ -54,7 +62,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
   }
 
   if (hasWarning("canonical-localhost", "canonical-relative")) {
-    fixes.push({
+    urlFixes.push({
       id: "fix-canonical-localhost",
       label: "Point canonical at production",
       weight: 0,
@@ -87,7 +95,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
 
   if (hasWarning("og-image-relative")) {
     const absImage = resolveRelativeToUrl(page.meta.image, pageUrl) ?? suggestedImage.url;
-    fixes.push({
+    urlFixes.push({
       id: "fix-og-image-absolute",
       label: "Use an absolute URL for og:image",
       weight: 0,
@@ -99,7 +107,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
 
   if (hasWarning("og-image-localhost")) {
     const prodImage = swapLocalhostOrigin(page.meta.image, host) ?? suggestedImage.url;
-    fixes.push({
+    urlFixes.push({
       id: "fix-og-image-localhost",
       label: "Point og:image at production",
       weight: 0,
@@ -114,7 +122,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
       page.meta.image && /^http:\/\//i.test(page.meta.image)
         ? page.meta.image.replace(/^http:\/\//i, "https://")
         : suggestedImage.url.replace(/^http:\/\//i, "https://");
-    fixes.push({
+    urlFixes.push({
       id: "fix-og-image-https",
       label: "Serve og:image over https",
       weight: 0,
@@ -123,6 +131,21 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
       category: "image",
     });
   }
+
+  if (productionUrlsWeight > 0) {
+    if (urlFixes.length > 0) {
+      urlFixes[0].weight = productionUrlsWeight;
+    } else {
+      urlFixes.push({
+        id: "fix-production-urls",
+        label: "Use absolute https:// URLs",
+        weight: productionUrlsWeight,
+        explain: "Ensure og:url, canonical, and social image tags use absolute https:// URLs (not localhost, relative paths, or data URIs).",
+        category: "url",
+      });
+    }
+  }
+  fixes.push(...urlFixes);
 
   if (hasWarning("og-image-svg")) {
     fixes.push({
@@ -134,7 +157,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
     });
   }
 
-  if (hasWarning("og-image-avif")) {
+  if (hasWarning("og-image-avif") && !checkIds.has("image-readable")) {
     fixes.push({
       id: "fix-og-image-avif",
       label: "Use PNG, JPEG, or WebP instead of AVIF",
@@ -144,7 +167,7 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
     });
   }
 
-  if (hasWarning("og-image-aspect-ratio")) {
+  if (hasWarning("og-image-aspect-ratio") && !checkIds.has("image-aspect-ratio")) {
     fixes.push({
       id: "fix-og-image-aspect-ratio",
       label: "Crop og:image closer to 1.91:1 (1200x630)",
@@ -178,7 +201,12 @@ export function fixesForPage(page: PageReport, report?: AuditReport): Fix[] {
 }
 
 function mergeImageFixes(fixes: Fix[], fromSibling: boolean): Fix[] {
-  const imageIds = new Set(["fix-og-image", "fix-image-readable", "fix-image-dimensions"]);
+  const imageIds = new Set([
+    "fix-og-image",
+    "fix-image-readable",
+    "fix-image-dimensions",
+    "fix-og-image-aspect-ratio",
+  ]);
   const imageFixes = fixes.filter((f) => imageIds.has(f.id));
   if (imageFixes.length <= 1) return fixes;
 
@@ -195,8 +223,8 @@ function mergeImageFixes(fixes: Fix[], fromSibling: boolean): Fix[] {
       : "Replace og:image with a valid 1200x630 image",
     weight: totalWeight,
     explain: missingTag
-      ? `Without og:image, social cards render without an image or not at all. Use a PNG, JPEG, or WebP at least 1200x630 at an absolute https:// URL.${siblingNote}`
-      : "The current og:image could not be loaded as a raster image or is smaller than 1200x630.",
+      ? `Without og:image, social cards render without an image or not at all. Use a PNG, JPEG, or WebP at least 1200x630 (1.91:1) at an absolute https:// URL.${siblingNote}`
+      : "The current og:image could not be loaded as a PNG/JPEG/WebP, is smaller than 1200x630, or has an off aspect ratio.",
     snippet: missingTag?.snippet,
     category: missingTag ? "tag" : "image",
   };
@@ -312,10 +340,18 @@ function checkToFix(checkId: string, weight: number, ctx: FixContext): Fix | nul
         explain: "Meta, LinkedIn, and X expect at least 1200x630 (1.91:1) for large card layouts.",
         category: "image",
       };
+    case "image-aspect-ratio":
+      return {
+        id: "fix-og-image-aspect-ratio",
+        label: "Crop og:image closer to 1.91:1 (1200x630)",
+        weight,
+        explain: "Square, portrait, or ultra-wide images get cropped awkwardly on X, Meta, and LinkedIn cards.",
+        category: "image",
+      };
     case "twitter-card":
       return {
         id: "fix-twitter-card",
-        label: "Add twitter:card",
+        label: ctx.page.meta.twitterCard ? "Fix invalid twitter:card" : "Add twitter:card",
         weight,
         explain: 'Controls card layout on X and Discord. Use "summary_large_image" for a full-width image card.',
         snippet: `<meta name="twitter:card" content="summary_large_image">`,

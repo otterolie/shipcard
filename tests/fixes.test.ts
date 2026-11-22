@@ -25,10 +25,17 @@ function buildPage(html: string, image: ImageAudit | null = null, path = "/page.
 function buildReport(pages: PageReport[]): AuditReport {
   return {
     tool: "shipcard",
-    version: "0.2.0",
+    version: "0.4.0",
     createdAt: new Date().toISOString(),
     target: { type: "folder", input: "/tmp/site" },
-    summary: { score: 0, pagesScanned: pages.length, passed: 0, warnings: 0, failed: pages.length },
+    summary: {
+      score: 0,
+      minScore: 0,
+      pagesScanned: pages.length,
+      passed: 0,
+      warnings: 0,
+      failed: pages.length,
+    },
     pages,
   };
 }
@@ -190,16 +197,14 @@ describe("fixBundle", () => {
     expect(fixBundle(fixesForPage(page))).toBe("");
   });
 
-  it("orders bundled snippets naturally (title, og:title, og:image, twitter:card, canonical)", () => {
+  it("orders bundled snippets naturally (og:title, og:image, twitter:card, canonical)", () => {
     const page = buildPage(`<html><head></head></html>`);
     const bundle = fixBundle(fixesForPage(page));
-    const titlePos = bundle.indexOf("<title>");
     const ogTitlePos = bundle.indexOf("og:title");
     const ogImagePos = bundle.indexOf("og:image");
     const twitterPos = bundle.indexOf("twitter:card");
     const canonicalPos = bundle.indexOf("canonical");
-    expect(titlePos).toBeGreaterThanOrEqual(0);
-    expect(titlePos).toBeLessThan(ogTitlePos);
+    expect(ogTitlePos).toBeGreaterThanOrEqual(0);
     expect(ogTitlePos).toBeLessThan(ogImagePos);
     expect(ogImagePos).toBeLessThan(twitterPos);
     expect(twitterPos).toBeLessThan(canonicalPos);

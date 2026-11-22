@@ -358,4 +358,42 @@ describe("--failures-only terminal rendering & CLI flags", () => {
     expect(stdout).toContain("All 1 pages passed.");
     expect(stdout).toContain("1 skipped");
   });
+
+  it("tracks minScore and exits 1 with --fail-on fail even when mean score is high", async () => {
+    const cliPath = path.resolve("dist/cli.js");
+    const exists = await fs.stat(cliPath).then(() => true).catch(() => false);
+    if (!exists) return;
+
+    const dir = await makeTempDir("shipcard-fail-on-");
+    await fs.writeFile(path.join(dir, "og.png"), GOOD_PNG);
+    for (let i = 0; i < 5; i++) {
+      await fs.writeFile(
+        path.join(dir, `ok-${i}.html`),
+        `<html><head>
+          <title>Page ${i}</title>
+          <meta name="description" content="Desc ${i}" />
+          <meta property="og:title" content="Page ${i}" />
+          <meta property="og:description" content="Desc ${i}" />
+          <meta property="og:image" content="https://example.com/og.png" />
+          <meta name="twitter:card" content="summary_large_image" />
+          <link rel="canonical" href="https://example.com/ok-${i}" />
+        </head></html>`,
+      );
+    }
+    await fs.writeFile(path.join(dir, "broken.html"), `<html><head></head></html>`);
+
+    const report = await audit(dir, { offline: true });
+    expect(report.summary.score).toBeGreaterThanOrEqual(80);
+    expect(report.summary.minScore).toBeLessThan(20);
+
+    const err = await execFileAsync(process.execPath, [
+      cliPath,
+      dir,
+      "--offline",
+      "--fail-on",
+      "fail",
+    ]).catch((e) => e);
+    expect(err.code).toBe(1);
+    expect(err.stdout).toContain("--fail-on fail");
+  });
 });

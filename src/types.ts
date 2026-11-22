@@ -49,11 +49,15 @@ export type ImageAudit = {
   warnings: Warning[];
 };
 
+export type CheckStatus = "pass" | "partial" | "fail" | "skipped";
+
 export type CheckResult = {
   id: string;
   label: string;
   passed: boolean;
+  status: CheckStatus;
   weight: number;
+  earned: number;
 };
 
 export type PageStatus = "pass" | "warn" | "fail";
@@ -126,6 +130,7 @@ export type AuditReport = {
   };
   summary: {
     score: number;
+    minScore: number;
     pagesScanned: number;
     passed: number;
     warnings: number;

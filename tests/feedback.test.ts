@@ -100,7 +100,7 @@ describe("platform reasons inline", () => {
       version: "0.2.0",
       createdAt: new Date().toISOString(),
       target: { type: "url" as const, input: "https://example.com" },
-      summary: { score: 50, pagesScanned: 1, passed: 0, warnings: 0, failed: 1 },
+      summary: { score: 50, minScore: 50, pagesScanned: 1, passed: 0, warnings: 0, failed: 1 },
       pages: [
         {
           path: "https://example.com",

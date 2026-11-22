@@ -33,6 +33,7 @@ cat dist/index.html | npx @otterolie/shipcard -
 
 # CI gate and JSON output
 npx @otterolie/shipcard ./dist --offline --fail-below 85
+npx @otterolie/shipcard ./dist --offline --fail-on fail
 npx @otterolie/shipcard ./dist --offline --json > report.json
 
 # Generate a standalone HTML preview of all platform cards
@@ -68,22 +69,21 @@ Folder scans auto-detect standard build directories (`dist`, `out`, `build`, `pu
 
 | Check | Points |
 | --- | ---: |
-| `title` | 10 |
-| `description` | 10 |
-| `og:title` | 10 |
-| `og:description` | 10 |
-| `og:image` | 20 |
-| Image loads and decodes (raster) | 15 |
+| `og:title` (partial credit if only `<title>` exists) | 15 |
+| `og:description` (partial credit if only meta description exists) | 10 |
+| `og:image` present | 15 |
+| Image loads as PNG, JPEG, or WebP (partial credit for AVIF) | 15 |
 | Image at least 1200x630 | 10 |
-| `twitter:card` | 5 |
+| Image aspect ratio near 1.91:1 | 5 |
+| Production-ready `https://` URLs (no localhost, relative, `http://`, or `data:`) | 15 |
+| Valid `twitter:card` value | 5 |
 | Canonical link | 5 |
 | No duplicate core tags | 5 |
 
-- `90-100`: Pass
-- `70-89`: Warn
-- `0-69`: Fail
-
-Multi-page scores are the rounded mean across scanned pages.
+- Skipped checks (with `--no-images` or remote images skipped under `--offline`) are excluded from the denominator rather than counted as failures.
+- Any error-level issue (for example a broken `twitter:image`) caps the page status at `Warn` regardless of score.
+- `90-100`: Pass · `70-89`: Warn · `0-69`: Fail
+- Multi-page reports include both the mean `score` and the worst page's `minScore`. Use `--fail-on fail` (or `--fail-on warn`) in CI so one broken page is not hidden by a high average.
 
 ## Platforms
 
@@ -105,6 +105,7 @@ Platform quirks to keep in mind:
 | --- | --- |
 | `--json` | Print the report as JSON |
 | `--fail-below <n>` | Exit 1 if the overall score is below `n` (0-100) |
+| `--fail-on <warn\|fail>` | Exit 1 if any page has status `warn` or `fail` |
 | `--timeout <ms>` | Network fetch timeout in milliseconds |
 | `--no-images` | Skip image loading and dimension checks |
 | `--offline` | Only check local files and local path mappings; never fetch remote images |
