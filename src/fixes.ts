@@ -235,8 +235,6 @@ function mergeImageFixes(fixes: Fix[], fromSibling: boolean): Fix[] {
 /** Combine all snippet-bearing fixes in natural <head> order. */
 export function fixBundle(fixes: Fix[]): string {
   const order = [
-    "fix-title",
-    "fix-description",
     "fix-og-title",
     "fix-og-description",
     "fix-og-image-combined",
@@ -275,24 +273,6 @@ function checkToFix(checkId: string, weight: number, ctx: FixContext): Fix | nul
   const u = escapeHtml(ctx.pageUrl);
 
   switch (checkId) {
-    case "title":
-      return {
-        id: "fix-title",
-        label: "Add a <title>",
-        weight,
-        explain: "Browsers, search engines, and social crawlers fall back to <title> when og:title is absent.",
-        snippet: `<title>${t}</title>`,
-        category: "tag",
-      };
-    case "description":
-      return {
-        id: "fix-description",
-        label: "Add a meta description",
-        weight,
-        explain: "Used by search engines and as a fallback when og:description is missing.",
-        snippet: `<meta name="description" content="${d}">`,
-        category: "tag",
-      };
     case "og-title":
       return {
         id: "fix-og-title",

@@ -12,6 +12,7 @@ const shared = {
   target: "node18" as const,
   clean: false,
   splitting: false,
+  minify: true,
   sourcemap: false,
   shims: false,
   define: {
